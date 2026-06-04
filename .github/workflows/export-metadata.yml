@@ -1,0 +1,48 @@
+name: DHF Metadata Export
+
+on:
+  workflow_dispatch:
+    # Manual trigger — run from Actions tab whenever you want a fresh export
+  push:
+    branches: [main]
+    paths:
+      - "dhf/**"
+
+jobs:
+  export:
+    name: Export DHF Metadata
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install pyyaml
+
+      - name: Run metadata export
+        run: python scripts/export_metadata.py
+
+      - name: Commit export files
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "chore: update DHF metadata exports [skip ci]"
+          file_pattern: "metadata-export.json metadata-export.csv"
+          commit_user_name: "GreyZone AI Bot"
+          commit_user_email: "bot@greyzone-ai.com"
+
+      - name: Upload as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dhf-metadata-export
+          path: |
+            metadata-export.json
+            metadata-export.csv
+          retention-days: 365
