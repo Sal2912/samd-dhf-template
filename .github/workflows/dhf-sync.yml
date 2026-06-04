@@ -7,12 +7,12 @@ on:
 
 jobs:
   dhf-sync:
-    name: Sync DHF from PR Impact Block
+    name: Claude DHF Sync
     runs-on: ubuntu-latest
     permissions:
-      contents: write        # commit updated DHF docs back to the PR branch
-      issues: write          # open review Issues for new hazards
-      pull-requests: write   # post summary comment on the PR
+      contents: write        # commit updated DHF docs back to PR branch
+      issues: write          # open review Issues
+      pull-requests: write   # post PR comment
 
     steps:
       - name: Checkout PR branch
@@ -27,10 +27,22 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install pyyaml requests
+        run: pip install anthropic requests pyyaml
 
-      - name: Run DHF Sync Bot
+      - name: Fetch PR diff
+        id: diff
         env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          DIFF=$(gh pr diff ${{ github.event.pull_request.number }} --repo ${{ github.repository }} 2>/dev/null | head -c 4000 || echo "")
+          echo "PR_DIFF<<EOF" >> $GITHUB_ENV
+          echo "$DIFF" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+
+      - name: Run DHF Sync Bot (Claude Haiku)
+        id: sync
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GITHUB_TOKEN:      ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           PR_NUMBER:         ${{ github.event.pull_request.number }}
@@ -38,31 +50,25 @@ jobs:
           PR_BODY:           ${{ github.event.pull_request.body }}
           PR_AUTHOR:         ${{ github.event.pull_request.user.login }}
         run: python scripts/dhf_sync_bot.py
-        # Exit code 1 means new hazards were drafted — PR blocked pending review
-        # Exit code 0 means all updates were clean (existing IDs only)
-        continue-on-error: true
-        id: sync
+        continue-on-error: true  # we handle exit codes below
 
       - name: Commit DHF document updates
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: |
-            chore(dhf): auto-update DHF from PR #${{ github.event.pull_request.number }} [skip ci]
+            chore(dhf): Claude DHF sync from PR #${{ github.event.pull_request.number }} [skip ci]
 
-            DHF Sync Bot updated:
-            - dhf/03-design-inputs-outputs.md
-            - dhf/02-risk-management-file.md
-            - dhf/05-traceability-matrix.md
+            Auto-updated by DHF Sync Bot (Claude Haiku).
+            Awaiting approval from @Sal2912 before merge.
           file_pattern: "dhf/**/*.md"
           commit_user_name: "GreyZone AI DHF Bot"
           commit_user_email: "bot@greyzone-ai.com"
 
-      - name: Run traceability check after sync
+      - name: Run traceability check
         run: python scripts/check_traceability.py
 
-      - name: Block merge if new hazards require review
+      - name: Block merge — awaiting reviewer approval
         if: steps.sync.outcome == 'failure'
         run: |
-          echo "❌ New hazards were auto-drafted and require human review."
-          echo "Complete the risk assessment in the GitHub Issues before merging."
+          echo "⏸  Merge blocked. @Sal2912 must comment 'approved' on the DHF review Issue."
           exit 1

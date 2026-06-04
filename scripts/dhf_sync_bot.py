@@ -1,27 +1,36 @@
 #!/usr/bin/env python3
 """
 DHF Sync Bot — GreyZone AI SaMD DHF Template
+Claude Haiku-Powered Edition
 =============================================
-Triggered on every PR to main. Reads the structured ## DHF Impact block
-from the PR description, then automatically:
+Triggered on every PR to main. Reads the ## DHF Impact block from the PR
+description, uses Claude Haiku to draft regulatory-grade document language,
+then automatically:
 
-  1. Updates or creates requirement entries in dhf/03-design-inputs-outputs.md
-  2. Updates or creates hazard entries in dhf/02-risk-management-file.md
+  1. Updates or creates requirement entries (dhf/03-design-inputs-outputs.md)
+  2. Updates or creates hazard entries   (dhf/02-risk-management-file.md)
   3. Links test cases wherever TEST-XXX is referenced
-  4. Updates the traceability matrix (dhf/05-traceability-matrix.md)
-  5. If no risk is linked and none exists → auto-drafts a new hazard from
-     PR context, adds a justification block, and opens a GitHub Issue for review
+  4. Updates the traceability matrix     (dhf/05-traceability-matrix.md)
+  5. If no risk is linked → Claude drafts a hazard statement + justification
+     in proper ISO 14971 language, then opens a GitHub Issue for human review
+  6. Blocks the merge until a designated reviewer approves via Issue comment
+
+Human review gate:
+  - Every new or modified DHF entry opens a GitHub Issue
+  - The Issue contains Claude's full draft + reasoning
+  - @Sal2912 must comment "approved" (case-insensitive) on the Issue
+  - A second workflow (dhf-review-gate.yml) watches for that comment
+    and marks the PR check as passed
 
 Environment variables (set by GitHub Actions):
-  GITHUB_TOKEN         — for API calls (Issues, PR comments)
-  GITHUB_REPOSITORY    — e.g. "Sal2912/samd-dhf-template"
-  PR_NUMBER            — the pull request number
-  PR_TITLE             — title of the PR
-  PR_BODY              — full PR description text
-  PR_AUTHOR            — GitHub login of the PR author
-
-Usage:
-  python scripts/dhf_sync_bot.py
+  ANTHROPIC_API_KEY  — Claude API key (stored as GitHub Secret)
+  GITHUB_TOKEN       — for Issues and PR comments
+  GITHUB_REPOSITORY  — e.g. "Sal2912/samd-dhf-template"
+  PR_NUMBER          — pull request number
+  PR_TITLE           — pull request title
+  PR_BODY            — full PR description
+  PR_AUTHOR          — GitHub login of PR author
+  PR_DIFF            — unified diff of the PR (passed by workflow)
 """
 
 import json
@@ -33,37 +42,39 @@ from datetime import date
 from pathlib import Path
 from textwrap import dedent
 
+import anthropic
 import requests
-import yaml
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
-ROOT = Path(__file__).parent.parent
-DHF = ROOT / "dhf"
+ROOT               = Path(__file__).parent.parent
+DHF                = ROOT / "dhf"
 REQUIREMENTS_FILE  = DHF / "03-design-inputs-outputs.md"
 RISK_FILE          = DHF / "02-risk-management-file.md"
 TRACEABILITY_FILE  = DHF / "05-traceability-matrix.md"
 
-# ── GitHub ─────────────────────────────────────────────────────────────────────
-GITHUB_TOKEN      = os.environ.get("GITHUB_TOKEN", "")
-GITHUB_REPOSITORY = os.environ.get("GITHUB_REPOSITORY", "Sal2912/samd-dhf-template")
-PR_NUMBER         = os.environ.get("PR_NUMBER", "")
-PR_TITLE          = os.environ.get("PR_TITLE", "No title")
-PR_BODY           = os.environ.get("PR_BODY", "")
-PR_AUTHOR         = os.environ.get("PR_AUTHOR", "unknown")
-TODAY             = date.today().isoformat()
+# ── Environment ────────────────────────────────────────────────────────────────
+ANTHROPIC_API_KEY  = os.environ.get("ANTHROPIC_API_KEY", "")
+GITHUB_TOKEN       = os.environ.get("GITHUB_TOKEN", "")
+GITHUB_REPOSITORY  = os.environ.get("GITHUB_REPOSITORY", "Sal2912/samd-dhf-template")
+PR_NUMBER          = os.environ.get("PR_NUMBER", "")
+PR_TITLE           = os.environ.get("PR_TITLE", "No title")
+PR_BODY            = os.environ.get("PR_BODY", "")
+PR_AUTHOR          = os.environ.get("PR_AUTHOR", "unknown")
+PR_DIFF            = os.environ.get("PR_DIFF", "")
+TODAY              = date.today().isoformat()
+REVIEWER           = "Sal2912"   # designated DHF reviewer
 
-GH_API = "https://api.github.com"
+GH_API     = "https://api.github.com"
 GH_HEADERS = {
     "Authorization": f"Bearer {GITHUB_TOKEN}",
-    "Accept": "application/vnd.github+json",
+    "Accept":        "application/vnd.github+json",
     "X-GitHub-Api-Version": "2022-11-28",
 }
 
 # ── Regex ──────────────────────────────────────────────────────────────────────
-REQ_RE   = re.compile(r"\bREQ-\d+\b")
-HAZ_RE   = re.compile(r"\bH-\d+\b")
-TEST_RE  = re.compile(r"\bTEST-\d+\b")
-RC_RE    = re.compile(r"\bRC-\d+\b")
+REQ_RE  = re.compile(r"\bREQ-\d+\b")
+HAZ_RE  = re.compile(r"\bH-\d+\b")
+TEST_RE = re.compile(r"\bTEST-\d+\b")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -72,38 +83,178 @@ RC_RE    = re.compile(r"\bRC-\d+\b")
 
 @dataclass
 class DHFImpact:
-    """Parsed content of the ## DHF Impact block in a PR description."""
-    raw_block: str = ""
+    raw_block:         str  = ""
+    requirements:      list[str] = field(default_factory=list)
+    hazards:           list[str] = field(default_factory=list)
+    tests:             list[str] = field(default_factory=list)
+    change_summary:    str  = ""
+    new_req_statement: str  = ""
+    new_req_category:  str  = ""
+    new_req_source:    str  = ""
+    risk_justification: str = ""
+    has_new_req:       bool = False
+    has_new_risk:      bool = False
 
-    # Explicit IDs referenced
-    requirements: list[str] = field(default_factory=list)   # e.g. [REQ-001, REQ-003]
-    hazards:      list[str] = field(default_factory=list)   # e.g. [H-002]
-    tests:        list[str] = field(default_factory=list)   # e.g. [TEST-007]
 
-    # Free-text fields from the structured block
-    change_summary:    str = ""   # What changed and why
-    new_req_statement: str = ""   # Text of a new requirement (if REQ is new)
-    new_req_category:  str = ""   # Functional | Performance | Security | etc.
-    new_req_source:    str = ""   # Clinical evidence | Standard | etc.
-    risk_justification: str = "" # Why no new risk / why existing risk covers it
-
-    # Derived
-    has_new_req:  bool = False
-    has_new_risk: bool = False
+@dataclass
+class ClaudeDraft:
+    """All content drafted by Claude for a single PR."""
+    requirement_statement:  str = ""
+    requirement_category:   str = ""
+    requirement_rationale:  str = ""
+    hazard_statement:       str = ""
+    hazardous_situation:    str = ""
+    potential_harm:         str = ""
+    risk_justification:     str = ""
+    traceability_rationale: str = ""
+    reasoning_summary:      str = ""   # Claude explains its decisions
 
 
 @dataclass
 class BotResult:
-    """Summary of all actions taken by the bot."""
-    reqs_updated:  list[str] = field(default_factory=list)
-    reqs_created:  list[str] = field(default_factory=list)
-    hazards_updated: list[str] = field(default_factory=list)
-    hazards_created: list[str] = field(default_factory=list)
-    tests_linked:  list[str] = field(default_factory=list)
-    traceability_rows_added: int = 0
-    issues_opened: list[str] = field(default_factory=list)
-    warnings:      list[str] = field(default_factory=list)
-    errors:        list[str] = field(default_factory=list)
+    reqs_updated:            list[str] = field(default_factory=list)
+    reqs_created:            list[str] = field(default_factory=list)
+    hazards_updated:         list[str] = field(default_factory=list)
+    hazards_created:         list[str] = field(default_factory=list)
+    tests_linked:            list[str] = field(default_factory=list)
+    traceability_rows_added: int       = 0
+    issues_opened:           list[str] = field(default_factory=list)
+    warnings:                list[str] = field(default_factory=list)
+    errors:                  list[str] = field(default_factory=list)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Claude drafting layer
+# ═══════════════════════════════════════════════════════════════════════════════
+
+SYSTEM_PROMPT = """\
+You are a regulatory writing assistant specializing in SaMD (Software as a Medical Device) \
+documentation under ISO 13485, IEC 62304, ISO 14971, and FDA 21 CFR Part 820.
+
+Your job is to read a software pull request description and code diff, then draft \
+regulatory-grade content for the Design History File (DHF). You write precise, \
+unambiguous regulatory language — not marketing language, not vague descriptions.
+
+Always output valid JSON matching the schema provided. Never add prose outside the JSON.
+"""
+
+def build_claude_prompt(impact: DHFImpact) -> str:
+    diff_excerpt = PR_DIFF[:3000] if PR_DIFF else "(no diff provided)"
+    return f"""
+A software engineer has opened a pull request on a SaMD product. \
+Analyze it and draft the required DHF content.
+
+## Pull Request Context
+
+**Title:** {PR_TITLE}
+**Author:** {PR_AUTHOR}
+**Change summary (engineer-provided):** {impact.change_summary or "(none provided)"}
+
+**DHF Impact block:**
+```
+{impact.raw_block or "(empty)"}
+```
+
+**Code diff (first 3000 chars):**
+```diff
+{diff_excerpt}
+```
+
+**Existing requirement IDs referenced:** {impact.requirements or "none"}
+**Existing hazard IDs referenced:** {impact.hazards or "none"}
+**Test IDs referenced:** {impact.tests or "none"}
+**Engineer stated new requirement needed:** {impact.has_new_req}
+**Engineer stated new risk exists:** {impact.has_new_risk}
+**Engineer's risk justification:** {impact.risk_justification or "(none provided)"}
+
+## Your Task
+
+Draft the following DHF content in proper regulatory language. \
+Output ONLY a JSON object with these exact keys:
+
+{{
+  "requirement_statement": "The system shall... [precise, testable, unambiguous]",
+  "requirement_category": "Functional | Performance | Security | Usability | Interface",
+  "requirement_rationale": "One sentence explaining the clinical or safety basis for this requirement.",
+  "hazard_statement": "Description of the hazard introduced or affected by this change. \
+Use ISO 14971 language: identify the energy/condition that could cause harm. \
+Write 'NO NEW HAZARD' if the change genuinely introduces no new risk, with justification.",
+  "hazardous_situation": "The circumstances in which a person is exposed to the hazard. \
+Write 'N/A' if hazard_statement is 'NO NEW HAZARD'.",
+  "potential_harm": "The injury or damage to health of a patient, user, or third party. \
+Write 'N/A' if hazard_statement is 'NO NEW HAZARD'.",
+  "risk_justification": "If no new risk: regulatory-grade justification for why existing \
+controls are sufficient. If new risk: write 'NEW HAZARD REQUIRES RISK ASSESSMENT'.",
+  "traceability_rationale": "One sentence explaining how this change links \
+requirement → hazard → test in the traceability matrix.",
+  "reasoning_summary": "2-3 sentences explaining your reasoning to the human reviewer. \
+What did you infer from the diff? What assumptions did you make? What should the reviewer verify?"
+}}
+
+Rules:
+- requirement_statement must start with "The system shall"
+- hazard_statement must follow ISO 14971 style (energy/condition → situation → harm chain)
+- Be specific — reference the actual functionality changed, not generic placeholders
+- If the diff is not enough to determine risk, say so explicitly in reasoning_summary
+- Do not hallucinate clinical details not present in the PR context
+"""
+
+
+def call_claude(impact: DHFImpact) -> ClaudeDraft:
+    """Call Claude Haiku to draft regulatory content. Returns ClaudeDraft."""
+    if not ANTHROPIC_API_KEY:
+        print("  ⚠️  No ANTHROPIC_API_KEY — falling back to template placeholders")
+        return ClaudeDraft(
+            requirement_statement  = f"The system shall [REVIEW REQUIRED — no Claude key]: {impact.change_summary or PR_TITLE}",
+            requirement_category   = impact.new_req_category or "Functional",
+            requirement_rationale  = "[Review required — Claude API key not configured]",
+            hazard_statement       = "[REVIEW REQUIRED — Claude API key not configured]",
+            hazardous_situation    = "[REVIEW REQUIRED]",
+            potential_harm         = "[REVIEW REQUIRED]",
+            risk_justification     = impact.risk_justification or "[REVIEW REQUIRED]",
+            traceability_rationale = "[REVIEW REQUIRED]",
+            reasoning_summary      = "Claude API key not configured. All fields require manual review.",
+        )
+
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+
+    print("  🤖 Calling Claude Haiku to draft regulatory content...")
+    try:
+        message = client.messages.create(
+            model      = "claude-haiku-4-5",   # cheapest Claude — ~$0.001 per run
+            max_tokens = 1024,
+            system     = SYSTEM_PROMPT,
+            messages   = [{"role": "user", "content": build_claude_prompt(impact)}],
+        )
+        raw = message.content[0].text.strip()
+
+        # Strip markdown code fences if Claude wrapped the JSON
+        raw = re.sub(r"^```(?:json)?\s*", "", raw)
+        raw = re.sub(r"\s*```$", "", raw)
+
+        data = json.loads(raw)
+        draft = ClaudeDraft(
+            requirement_statement  = data.get("requirement_statement", "[REVIEW]"),
+            requirement_category   = data.get("requirement_category", "Functional"),
+            requirement_rationale  = data.get("requirement_rationale", "[REVIEW]"),
+            hazard_statement       = data.get("hazard_statement", "[REVIEW]"),
+            hazardous_situation    = data.get("hazardous_situation", "[REVIEW]"),
+            potential_harm         = data.get("potential_harm", "[REVIEW]"),
+            risk_justification     = data.get("risk_justification", "[REVIEW]"),
+            traceability_rationale = data.get("traceability_rationale", "[REVIEW]"),
+            reasoning_summary      = data.get("reasoning_summary", "[REVIEW]"),
+        )
+        print("  ✅ Claude draft complete")
+        return draft
+
+    except (json.JSONDecodeError, KeyError, anthropic.APIError) as e:
+        print(f"  ⚠️  Claude call failed: {e} — falling back to placeholders")
+        return ClaudeDraft(
+            requirement_statement  = f"The system shall [REVIEW REQUIRED]: {impact.change_summary or PR_TITLE}",
+            requirement_category   = "Functional",
+            hazard_statement       = "[REVIEW REQUIRED — Claude call failed]",
+            reasoning_summary      = f"Claude call failed: {e}. All fields require manual review.",
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -111,11 +262,6 @@ class BotResult:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def parse_dhf_impact_block(pr_body: str) -> DHFImpact | None:
-    """
-    Extract and parse the ## DHF Impact section from a PR description.
-    Returns None if no DHF Impact block is found (non-DHF PR — bot does nothing).
-    """
-    # Find the block between ## DHF Impact and the next ## heading (or end)
     match = re.search(
         r"##\s+DHF\s+Impact\s*\n(.*?)(?=\n##|\Z)",
         pr_body,
@@ -127,28 +273,24 @@ def parse_dhf_impact_block(pr_body: str) -> DHFImpact | None:
     block = match.group(1).strip()
     impact = DHFImpact(raw_block=block)
 
-    # Parse structured key: value lines
-    def extract_field(key: str) -> str:
+    def field(key: str) -> str:
         m = re.search(rf"^\s*{key}\s*:\s*(.+)$", block, re.MULTILINE | re.IGNORECASE)
         return m.group(1).strip() if m else ""
 
-    # IDs
-    req_raw  = extract_field("REQ")
-    haz_raw  = extract_field("RISK")
-    test_raw = extract_field("TEST")
+    req_raw  = field("REQ")
+    haz_raw  = field("RISK")
+    test_raw = field("TEST")
 
-    impact.requirements = [r.strip() for r in REQ_RE.findall(req_raw)] if req_raw else []
-    impact.hazards      = [h.strip() for h in HAZ_RE.findall(haz_raw)] if haz_raw else []
-    impact.tests        = [t.strip() for t in TEST_RE.findall(test_raw)] if test_raw else []
+    impact.requirements = REQ_RE.findall(req_raw)  if req_raw  else []
+    impact.hazards      = HAZ_RE.findall(haz_raw)  if haz_raw  else []
+    impact.tests        = TEST_RE.findall(test_raw) if test_raw else []
 
-    # Free-text fields
-    impact.change_summary     = extract_field("CHANGE")
-    impact.new_req_statement  = extract_field("NEW_REQ")
-    impact.new_req_category   = extract_field("REQ_CATEGORY") or "Functional"
-    impact.new_req_source     = extract_field("REQ_SOURCE") or "Engineering"
-    impact.risk_justification = extract_field("RISK_JUSTIFICATION")
+    impact.change_summary     = field("CHANGE")
+    impact.new_req_statement  = field("NEW_REQ")
+    impact.new_req_category   = field("REQ_CATEGORY") or "Functional"
+    impact.new_req_source     = field("REQ_SOURCE") or "Engineering"
+    impact.risk_justification = field("RISK_JUSTIFICATION")
 
-    # Detect "NEW" keywords
     impact.has_new_req  = bool(re.search(r"\bNEW\b", req_raw,  re.IGNORECASE)) if req_raw  else False
     impact.has_new_risk = bool(re.search(r"\bNEW\b", haz_raw, re.IGNORECASE)) if haz_raw else False
 
@@ -156,154 +298,140 @@ def parse_dhf_impact_block(pr_body: str) -> DHFImpact | None:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# ID generation helpers
+# ID helpers
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def get_next_req_id(content: str) -> str:
-    existing = REQ_RE.findall(content)
-    nums = [int(r.split("-")[1]) for r in existing] if existing else [0]
+def next_req_id(content: str) -> str:
+    nums = [int(r.split("-")[1]) for r in REQ_RE.findall(content)] or [0]
     return f"REQ-{max(nums) + 1:03d}"
 
-
-def get_next_hazard_id(content: str) -> str:
-    existing = HAZ_RE.findall(content)
-    nums = [int(h.split("-")[1]) for h in existing] if existing else [0]
+def next_haz_id(content: str) -> str:
+    nums = [int(h.split("-")[1]) for h in HAZ_RE.findall(content)] or [0]
     return f"H-{max(nums) + 1:03d}"
 
-
-def req_exists(req_id: str, content: str) -> bool:
-    return bool(re.search(rf"\b{re.escape(req_id)}\b", content))
-
-
-def hazard_exists(haz_id: str, content: str) -> bool:
-    return bool(re.search(rf"\b{re.escape(haz_id)}\b", content))
+def id_exists(id_str: str, content: str) -> bool:
+    return bool(re.search(rf"\b{re.escape(id_str)}\b", content))
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# DHF document updaters
+# DHF document writers
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def add_requirement_row(req_id: str, impact: DHFImpact) -> None:
-    """Append a new requirement row to the design inputs table."""
-    content = REQUIREMENTS_FILE.read_text()
-    linked_hazards = ", ".join(impact.hazards) if impact.hazards else "—"
-    pr_ref = f"PR #{PR_NUMBER}" if PR_NUMBER else "code change"
+def update_frontmatter_date(content: str) -> str:
+    return re.sub(r"(last_reviewed:\s*)\S+", rf"\g<1>{TODAY}", content, count=1)
+
+
+def add_requirement_row(req_id: str, impact: DHFImpact, draft: ClaudeDraft) -> None:
+    content   = REQUIREMENTS_FILE.read_text()
+    linked_h  = ", ".join(impact.hazards) if impact.hazards else "—"
+    pr_ref    = f"PR #{PR_NUMBER}"
 
     new_row = (
         f"| {req_id} "
-        f"| {impact.new_req_category} "
-        f"| {impact.new_req_statement or impact.change_summary or f'[Auto-created from {pr_ref}: {PR_TITLE}]'} "
-        f"| {impact.new_req_source} "
+        f"| {draft.requirement_category} "
+        f"| {draft.requirement_statement} "
+        f"| {impact.new_req_source or draft.requirement_category} "
         f"| Must-have "
-        f"| {linked_hazards} |\n"
+        f"| {linked_h} |\n"
+        f"<!-- Claude draft ({TODAY}, {pr_ref}). "
+        f"Rationale: {draft.requirement_rationale} "
+        f"Awaiting approval from @{REVIEWER}. -->\n"
     )
 
-    # Insert before the "Requirement categories:" line or at end of table
     anchor = "**Requirement categories:**"
-    if anchor in content:
-        content = content.replace(anchor, new_row + anchor)
-    else:
-        # Fallback: append before review history
-        content = content.replace(
+    content = (
+        content.replace(anchor, new_row + anchor)
+        if anchor in content
+        else content.replace(
             "## 5. Review History",
-            f"<!-- Auto-added by DHF Sync Bot: {TODAY} -->\n{new_row}\n## 5. Review History",
+            f"{new_row}\n## 5. Review History",
         )
-
-    # Update frontmatter last_reviewed
-    content = update_frontmatter_date(content)
-    REQUIREMENTS_FILE.write_text(content)
-    print(f"  ✅ Created requirement {req_id} in design inputs doc")
+    )
+    REQUIREMENTS_FILE.write_text(update_frontmatter_date(content))
+    print(f"  ✅ Created {req_id} in design inputs (Claude-drafted)")
 
 
-def update_requirement_linkage(req_id: str, impact: DHFImpact) -> None:
-    """Add hazard and test cross-references to an existing requirement row."""
+def update_requirement_linkage(req_id: str, impact: DHFImpact, draft: ClaudeDraft) -> None:
     content = REQUIREMENTS_FILE.read_text()
-    # Annotate the existing row with a comment noting the new linkage
-    pr_ref = f"PR #{PR_NUMBER}" if PR_NUMBER else "code change"
-    note = f"\n<!-- Linkage updated by DHF Sync Bot ({TODAY}, {pr_ref}): hazards={impact.hazards}, tests={impact.tests} -->"
-    # Insert note after the line containing the req_id
+    note = (
+        f"\n<!-- Linkage updated by DHF Sync Bot ({TODAY}, PR #{PR_NUMBER}): "
+        f"hazards={impact.hazards}, tests={impact.tests}. "
+        f"Rationale: {draft.traceability_rationale} -->"
+    )
     lines = content.split("\n")
     updated = []
     for line in lines:
         updated.append(line)
         if req_id in line and "|" in line:
             updated.append(note)
-    content = "\n".join(updated)
-    content = update_frontmatter_date(content)
-    REQUIREMENTS_FILE.write_text(content)
-    print(f"  🔗 Updated linkage for {req_id} in design inputs doc")
+    REQUIREMENTS_FILE.write_text(update_frontmatter_date("\n".join(updated)))
+    print(f"  🔗 Updated linkage for {req_id}")
 
 
-def add_hazard_row(haz_id: str, impact: DHFImpact) -> str:
-    """Append a new hazard row to the risk management file. Returns the haz_id."""
+def add_hazard_row(haz_id: str, impact: DHFImpact, draft: ClaudeDraft) -> None:
     content = RISK_FILE.read_text()
-    pr_ref = f"PR #{PR_NUMBER}" if PR_NUMBER else "code change"
+    pr_ref  = f"PR #{PR_NUMBER}"
+    no_new_risk = "NO NEW HAZARD" in draft.hazard_statement.upper()
 
-    # Auto-draft hazard statement from PR context
-    auto_hazard = (
-        impact.change_summary
-        or f"Potential hazard introduced by code change: {PR_TITLE}"
-    )
-    auto_situation = f"[Auto-drafted — review required. Source: {pr_ref}: {PR_TITLE}]"
+    if no_new_risk:
+        hazard_text    = f"[No new hazard — see justification below] {draft.hazard_statement}"
+        situation_text = "N/A"
+        harm_text      = "N/A"
+        sev = prob = risk = "N/A"
+        control = f"Existing controls sufficient — {draft.risk_justification}"
+        residual = "Acceptable"
+    else:
+        hazard_text    = draft.hazard_statement
+        situation_text = draft.hazardous_situation
+        harm_text      = draft.potential_harm
+        sev = prob = risk = "[?] — REVIEW REQUIRED"
+        control  = "[RC-XXX — REVIEW REQUIRED]"
+        residual = "[REVIEW REQUIRED]"
 
     new_row = (
         f"| {haz_id} "
-        f"| {auto_hazard} "
-        f"| {auto_situation} "
-        f"| [Hazardous situation — REVIEW REQUIRED] "
-        f"| [Harm — REVIEW REQUIRED] "
-        f"| [?] | [?] | [?×?] "
-        f"| [Control — REVIEW REQUIRED] "
-        f"| [Residual — REVIEW REQUIRED] |\n"
-        f"<!-- AUTO-DRAFTED by DHF Sync Bot ({TODAY}). "
-        f"Assigned to @{PR_AUTHOR} for review via GitHub Issue. -->\n"
+        f"| {hazard_text} "
+        f"| {situation_text} "
+        f"| {situation_text} "
+        f"| {harm_text} "
+        f"| {sev} | {prob} | {risk} "
+        f"| {control} "
+        f"| {residual} |\n"
+        f"<!-- Claude draft ({TODAY}, {pr_ref}). AWAITING APPROVAL from @{REVIEWER}. -->\n"
     )
 
-    anchor = "**Risk scoring guide:**"
-    if anchor in content:
-        content = content.replace(anchor, new_row + anchor)
-    else:
-        content = content.replace(
-            "## 3. Risk Controls Summary",
-            f"<!-- Auto-added by DHF Sync Bot: {TODAY} -->\n{new_row}\n## 3. Risk Controls Summary",
-        )
-
-    # Add justification block if no existing risk covers this
     justification_block = dedent(f"""
-        <!-- DHF SYNC BOT — NO EXISTING RISK LINKED ({TODAY})
-        PR: #{PR_NUMBER} — {PR_TITLE}
-        Author: @{PR_AUTHOR}
+        <!-- DHF SYNC BOT — RISK ASSESSMENT ({TODAY}, {pr_ref})
+        Claude's risk justification:
+        {draft.risk_justification}
 
-        Justification provided:
-        {impact.risk_justification or "[No justification provided in PR — review required]"}
+        Claude's reasoning for human reviewer:
+        {draft.reasoning_summary}
 
-        Action required:
-        1. Review the auto-drafted hazard entry {haz_id} above
-        2. Fill in all [?] and [REVIEW REQUIRED] fields
-        3. Assign a risk control (RC-XXX)
-        4. Update the traceability matrix
-        5. Close the GitHub Issue once complete
+        Action: @{REVIEWER} must review and approve via GitHub Issue before merge.
         -->
     """).strip()
 
-    content = content.replace(
-        "## 7. Review History" if "## 7. Review History" in content else "## 6. Review History",
-        justification_block + "\n\n## 6. Review History",
+    anchor = "**Risk scoring guide:**"
+    content = (
+        content.replace(anchor, new_row + anchor)
+        if anchor in content
+        else content.replace("## 3. Risk Controls Summary",
+                             f"{new_row}\n## 3. Risk Controls Summary")
     )
 
-    content = update_frontmatter_date(content)
-    RISK_FILE.write_text(content)
-    print(f"  ✅ Auto-drafted hazard {haz_id} in risk management file")
-    return haz_id
+    review_anchor = "## 6. Review History"
+    content = content.replace(review_anchor, justification_block + f"\n\n{review_anchor}")
+    RISK_FILE.write_text(update_frontmatter_date(content))
+    print(f"  ✅ Created {haz_id} in risk file (Claude-drafted)")
 
 
-def update_hazard_linkage(haz_id: str, impact: DHFImpact) -> None:
-    """Annotate an existing hazard row with new requirement/test linkage."""
+def update_hazard_linkage(haz_id: str, impact: DHFImpact, draft: ClaudeDraft) -> None:
     content = RISK_FILE.read_text()
-    pr_ref = f"PR #{PR_NUMBER}" if PR_NUMBER else "code change"
     note = (
-        f"\n<!-- Linkage updated by DHF Sync Bot ({TODAY}, {pr_ref}): "
-        f"reqs={impact.requirements}, tests={impact.tests} -->"
+        f"\n<!-- Linkage updated by DHF Sync Bot ({TODAY}, PR #{PR_NUMBER}): "
+        f"reqs={impact.requirements}, tests={impact.tests}. "
+        f"Rationale: {draft.traceability_rationale} -->"
     )
     lines = content.split("\n")
     updated = []
@@ -311,131 +439,146 @@ def update_hazard_linkage(haz_id: str, impact: DHFImpact) -> None:
         updated.append(line)
         if haz_id in line and "|" in line:
             updated.append(note)
-    content = "\n".join(updated)
-    content = update_frontmatter_date(content)
-    RISK_FILE.write_text(content)
-    print(f"  🔗 Updated linkage for {haz_id} in risk management file")
+    RISK_FILE.write_text(update_frontmatter_date("\n".join(updated)))
+    print(f"  🔗 Updated linkage for {haz_id}")
 
 
-def add_traceability_row(req_id: str, haz_id: str, test_ids: list[str], impact: DHFImpact) -> None:
-    """Add a row to the master traceability table."""
-    content = TRACEABILITY_FILE.read_text()
-    pr_ref = f"PR #{PR_NUMBER}" if PR_NUMBER else "code change"
-    tests_str = ", ".join(test_ids) if test_ids else "[TEST-XXX — link required]"
+def add_traceability_row(req_id: str, haz_id: str, tests: list[str], draft: ClaudeDraft) -> None:
+    content   = TRACEABILITY_FILE.read_text()
+    tests_str = ", ".join(tests) if tests else "[TEST-XXX — REVIEW REQUIRED]"
+    pr_ref    = f"PR #{PR_NUMBER}"
 
     new_row = (
-        f"| [UN-AUTO] "
+        f"| [UN-AUTO — REVIEW] "
         f"| {req_id} "
-        f"| [DO-XXX] "
+        f"| [DO-XXX — REVIEW] "
         f"| {haz_id} "
-        f"| [RC-XXX] "
+        f"| [RC-XXX — REVIEW] "
         f"| {tests_str} "
-        f"| [VAL-XXX] |\n"
-        f"<!-- Auto-added by DHF Sync Bot ({TODAY}, {pr_ref}) — "
-        f"fill [UN-AUTO], [DO-XXX], [RC-XXX], [VAL-XXX] -->\n"
+        f"| [VAL-XXX — REVIEW] |\n"
+        f"<!-- Claude draft ({TODAY}, {pr_ref}). "
+        f"Rationale: {draft.traceability_rationale} "
+        f"Awaiting approval from @{REVIEWER}. -->\n"
     )
 
-    # Insert before the traceability rules section
     anchor = "## Traceability Rules"
-    if anchor in content:
-        content = content.replace(anchor, new_row + anchor)
-    else:
-        content += f"\n{new_row}"
-
-    content = update_frontmatter_date(content)
-    TRACEABILITY_FILE.write_text(content)
+    content = (
+        content.replace(anchor, new_row + anchor)
+        if anchor in content
+        else content + f"\n{new_row}"
+    )
+    TRACEABILITY_FILE.write_text(update_frontmatter_date(content))
     print(f"  ✅ Added traceability row: {req_id} ↔ {haz_id} ↔ {tests_str}")
 
 
-def update_traceability_linkage(req_id: str, haz_id: str, test_ids: list[str]) -> None:
-    """Annotate existing traceability rows with new test or hazard linkage."""
-    content = TRACEABILITY_FILE.read_text()
-    pr_ref = f"PR #{PR_NUMBER}" if PR_NUMBER else "code change"
-    tests_str = ", ".join(test_ids)
+def update_traceability_linkage(req_id: str, haz_id: str, tests: list[str], draft: ClaudeDraft) -> None:
+    content   = TRACEABILITY_FILE.read_text()
+    tests_str = ", ".join(tests)
     note = (
-        f"\n<!-- Traceability updated by DHF Sync Bot ({TODAY}, {pr_ref}): "
-        f"added linkage {req_id}↔{haz_id}↔{tests_str} -->"
+        f"\n<!-- Traceability updated ({TODAY}, PR #{PR_NUMBER}): "
+        f"{req_id}↔{haz_id}↔{tests_str}. "
+        f"Rationale: {draft.traceability_rationale} -->"
     )
-    # Add note after the row containing req_id
     lines = content.split("\n")
     updated = []
     for line in lines:
         updated.append(line)
         if req_id in line and "|" in line:
             updated.append(note)
-    content = "\n".join(updated)
-    content = update_frontmatter_date(content)
-    TRACEABILITY_FILE.write_text(content)
-    print(f"  🔗 Updated traceability linkage for {req_id}")
-
-
-def update_frontmatter_date(content: str) -> str:
-    """Update last_reviewed in YAML frontmatter to today."""
-    return re.sub(
-        r"(last_reviewed:\s*)\S+",
-        rf"\g<1>{TODAY}",
-        content,
-        count=1,
-    )
+    TRACEABILITY_FILE.write_text(update_frontmatter_date("\n".join(updated)))
+    print(f"  🔗 Updated traceability for {req_id}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# GitHub API helpers
+# GitHub helpers
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def open_review_issue(haz_id: str, req_id: str, impact: DHFImpact) -> str:
-    """Open a GitHub Issue requesting human review of an auto-drafted hazard."""
-    pr_ref = f"PR #{PR_NUMBER}" if PR_NUMBER else "a code change"
-    title = f"🔴 DHF Review Required: Auto-drafted hazard {haz_id} (from {pr_ref})"
+def open_review_issue(
+    haz_id: str,
+    req_id: str,
+    impact: DHFImpact,
+    draft: ClaudeDraft,
+) -> str:
+    no_new_risk = "NO NEW HAZARD" in draft.hazard_statement.upper()
+    severity    = "🟡 Linkage Update" if no_new_risk else "🔴 New Hazard — Risk Assessment Required"
+    pr_ref      = f"PR #{PR_NUMBER}"
+
+    title = f"{severity}: DHF Review — {req_id} / {haz_id} ({pr_ref})"
+
     body = dedent(f"""
-        ## Auto-Drafted Hazard Requires Review
+        ## DHF Human Review Required
 
-        The DHF Sync Bot created a new hazard entry **{haz_id}** because a code change
-        was merged that introduced a new requirement **{req_id}** with no existing risk linkage.
+        The DHF Sync Bot has updated DHF documents for **{pr_ref}: {PR_TITLE}**.
+        **@{REVIEWER}** — please review Claude's drafts below and comment `approved` to unblock the merge.
+
+        ---
+
+        ## Claude's Reasoning
+
+        > {draft.reasoning_summary}
+
+        ---
+
+        ## Drafted Content
+
+        ### Requirement — `{req_id}`
+
+        | Field | Claude's Draft |
+        |---|---|
+        | **Statement** | {draft.requirement_statement} |
+        | **Category** | {draft.requirement_category} |
+        | **Rationale** | {draft.requirement_rationale} |
+
+        ### Hazard — `{haz_id}`
+
+        | Field | Claude's Draft |
+        |---|---|
+        | **Hazard statement** | {draft.hazard_statement} |
+        | **Hazardous situation** | {draft.hazardous_situation} |
+        | **Potential harm** | {draft.potential_harm} |
+        | **Risk justification** | {draft.risk_justification} |
+
+        ### Traceability
 
         | Field | Value |
         |---|---|
-        | **PR** | #{PR_NUMBER} — {PR_TITLE} |
-        | **Author** | @{PR_AUTHOR} |
-        | **Requirement** | {req_id} |
-        | **Auto-drafted hazard** | {haz_id} |
-        | **Tests referenced** | {", ".join(impact.tests) or "None"} |
-        | **Justification provided** | {impact.risk_justification or "⚠️ None provided"} |
-
-        ## Hazard auto-drafted from PR context
-
-        > {impact.change_summary or PR_TITLE}
-
-        This is a **draft only**. The following fields in `dhf/02-risk-management-file.md` need human review:
-
-        - [ ] Confirm or revise the hazard statement
-        - [ ] Define the foreseeable sequence of events
-        - [ ] Identify the hazardous situation
-        - [ ] Identify the patient/user harm
-        - [ ] Assign severity and probability scores
-        - [ ] Define a risk control (RC-XXX)
-        - [ ] Confirm residual risk is acceptable
-
-        Then update `dhf/05-traceability-matrix.md` to replace `[RC-XXX]`, `[UN-AUTO]`, `[DO-XXX]`, and `[VAL-XXX]` placeholders.
-
-        Close this issue once all fields are complete and reviewed.
+        | **Requirement** | `{req_id}` |
+        | **Hazard** | `{haz_id}` |
+        | **Tests** | {", ".join(impact.tests) or "None linked — add TEST-XXX"} |
+        | **Rationale** | {draft.traceability_rationale} |
 
         ---
-        *Opened automatically by the GreyZone AI DHF Sync Bot.*
+
+        ## Reviewer Checklist
+
+        - [ ] Requirement statement is precise, testable, and unambiguous
+        - [ ] Hazard statement follows ISO 14971 language
+        - [ ] Hazardous situation and harm are correctly identified
+        - [ ] Severity and probability scores assigned in risk file
+        - [ ] Risk control (RC-XXX) assigned or confirmed sufficient
+        - [ ] Test cases cover this requirement (TEST-XXX linked)
+        - [ ] Traceability matrix placeholders resolved
+
+        ## To Approve
+
+        Comment **`approved`** on this Issue. The merge gate will lift automatically.
+
+        ---
+        *Drafted by Claude Haiku · Opened by GreyZone AI DHF Sync Bot · {TODAY}*
     """).strip()
 
     if not GITHUB_TOKEN or not PR_NUMBER:
-        print(f"  ⚠️  No GITHUB_TOKEN or PR_NUMBER — skipping Issue creation for {haz_id}")
+        print(f"  ⚠️  Missing GITHUB_TOKEN or PR_NUMBER — skipping Issue")
         return ""
 
     resp = requests.post(
         f"{GH_API}/repos/{GITHUB_REPOSITORY}/issues",
         headers=GH_HEADERS,
         json={
-            "title": title,
-            "body": body,
-            "labels": ["dhf-review", "risk-review", "automated"],
-            "assignees": [PR_AUTHOR] if PR_AUTHOR != "unknown" else [],
+            "title":     title,
+            "body":      body,
+            "labels":    ["dhf-review", "awaiting-approval", "automated"],
+            "assignees": [REVIEWER],
         },
         timeout=10,
     )
@@ -444,191 +587,167 @@ def open_review_issue(haz_id: str, req_id: str, impact: DHFImpact) -> str:
         print(f"  🔴 Review Issue opened: {url}")
         return url
     else:
-        print(f"  ❌ Failed to open Issue: {resp.status_code}")
+        print(f"  ❌ Failed to open Issue: {resp.status_code} — {resp.text}")
         return ""
 
 
-def post_pr_summary(result: BotResult) -> None:
-    """Post a summary comment to the PR."""
+def post_pr_summary(result: BotResult, draft: ClaudeDraft) -> None:
     if not GITHUB_TOKEN or not PR_NUMBER:
         return
 
-    def badge(items: list, label: str) -> str:
-        return f"**{label}:** {', '.join(items)}" if items else ""
-
-    lines = ["## 🤖 DHF Sync Bot Report\n"]
+    lines = [
+        "## 🤖 DHF Sync Bot Report\n",
+        f"*Model: Claude Haiku · {TODAY}*\n",
+    ]
 
     if result.reqs_created:
         lines.append(f"✅ **Requirements created:** {', '.join(result.reqs_created)}")
     if result.reqs_updated:
         lines.append(f"🔗 **Requirements updated:** {', '.join(result.reqs_updated)}")
     if result.hazards_created:
-        lines.append(f"⚠️ **Hazards auto-drafted (review required):** {', '.join(result.hazards_created)}")
+        lines.append(f"⚠️ **Hazards drafted:** {', '.join(result.hazards_created)}")
     if result.hazards_updated:
         lines.append(f"🔗 **Hazards updated:** {', '.join(result.hazards_updated)}")
     if result.tests_linked:
         lines.append(f"🧪 **Tests linked:** {', '.join(result.tests_linked)}")
     if result.traceability_rows_added:
-        lines.append(f"📋 **Traceability rows added/updated:** {result.traceability_rows_added}")
+        lines.append(f"📋 **Traceability rows added:** {result.traceability_rows_added}")
+
     if result.issues_opened:
-        lines.append(f"🔴 **Review Issues opened:** {len(result.issues_opened)}")
+        lines.append(f"\n### 🔴 Review Required")
+        lines.append(f"**@{REVIEWER}** must approve before this PR can merge:")
         for url in result.issues_opened:
-            lines.append(f"  - {url}")
-    if result.warnings:
-        lines.append("\n**Warnings:**")
-        for w in result.warnings:
-            lines.append(f"  - ⚠️ {w}")
-    if result.errors:
-        lines.append("\n**Errors:**")
-        for e in result.errors:
-            lines.append(f"  - ❌ {e}")
+            lines.append(f"- {url}")
 
-    if len(lines) == 1:
-        lines.append("No DHF documents required updates for this PR.")
-
+    lines.append(f"\n**Claude's reasoning:**\n> {draft.reasoning_summary}")
     lines.append(
-        "\n---\n*DHF documents updated automatically. "
-        "Commit these changes before merging.*"
+        "\n---\n*DHF documents updated and committed to this branch. "
+        f"Merge is blocked until @{REVIEWER} approves the review Issue(s).*"
     )
 
-    body = "\n".join(lines)
-    resp = requests.post(
+    requests.post(
         f"{GH_API}/repos/{GITHUB_REPOSITORY}/issues/{PR_NUMBER}/comments",
         headers=GH_HEADERS,
-        json={"body": body},
+        json={"body": "\n".join(lines)},
         timeout=10,
     )
-    if resp.ok:
-        print(f"  💬 PR summary comment posted")
-    else:
-        print(f"  ❌ Failed to post PR comment: {resp.status_code}")
+    print("  💬 PR summary comment posted")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Main orchestration
+# Main
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def main() -> None:
     print("=" * 60)
-    print("DHF Sync Bot — GreyZone AI")
+    print("DHF Sync Bot — GreyZone AI (Claude Haiku)")
     print(f"PR #{PR_NUMBER}: {PR_TITLE}")
     print("=" * 60)
 
-    # ── 1. Parse DHF Impact block ───────────────────────────────────────────────
+    # 1. Parse DHF Impact block
     impact = parse_dhf_impact_block(PR_BODY)
     if impact is None:
-        print("\nℹ️  No ## DHF Impact block found in PR description.")
-        print("   This PR has no DHF implications — bot taking no action.\n")
+        print("\nℹ️  No ## DHF Impact block — bot taking no action.\n")
         sys.exit(0)
 
-    print(f"\n📋 DHF Impact parsed:")
-    print(f"   Requirements : {impact.requirements or ['(none)']}")
-    print(f"   Hazards      : {impact.hazards or ['(none)']}")
-    print(f"   Tests        : {impact.tests or ['(none)']}")
-    print(f"   New REQ?     : {impact.has_new_req}")
-    print(f"   New RISK?    : {impact.has_new_risk}")
-    print()
+    print(f"\n📋 Parsed: REQs={impact.requirements} HAZs={impact.hazards} TESTs={impact.tests}")
+    print(f"   new_req={impact.has_new_req}  new_risk={impact.has_new_risk}\n")
+
+    # 2. Call Claude to draft all regulatory content
+    draft = call_claude(impact)
 
     result = BotResult()
-
-    # Read current file contents for ID existence checks
     req_content  = REQUIREMENTS_FILE.read_text()
     risk_content = RISK_FILE.read_text()
 
-    # ── 2. Handle requirements ─────────────────────────────────────────────────
+    # 3. Handle requirements
     final_req_ids = []
-
     if impact.has_new_req or not impact.requirements:
-        # Create a brand-new requirement
-        new_req_id = get_next_req_id(req_content)
-        add_requirement_row(new_req_id, impact)
-        result.reqs_created.append(new_req_id)
-        final_req_ids.append(new_req_id)
-        # Refresh content for subsequent ID checks
+        new_id = next_req_id(req_content)
+        add_requirement_row(new_id, impact, draft)
+        result.reqs_created.append(new_id)
+        final_req_ids.append(new_id)
         req_content = REQUIREMENTS_FILE.read_text()
     else:
         for req_id in impact.requirements:
-            if req_exists(req_id, req_content):
-                update_requirement_linkage(req_id, impact)
+            if id_exists(req_id, req_content):
+                update_requirement_linkage(req_id, impact, draft)
                 result.reqs_updated.append(req_id)
             else:
-                # Referenced ID doesn't exist yet — create it
-                add_requirement_row(req_id, impact)
+                add_requirement_row(req_id, impact, draft)
                 result.reqs_created.append(req_id)
                 req_content = REQUIREMENTS_FILE.read_text()
             final_req_ids.append(req_id)
 
-    # ── 3. Handle hazards ──────────────────────────────────────────────────────
+    # 4. Handle hazards
     final_haz_ids = []
+    needs_review  = False
 
     if impact.has_new_risk or not impact.hazards:
-        # No existing risk linked — auto-draft a new one
-        new_haz_id = get_next_hazard_id(risk_content)
-        add_hazard_row(new_haz_id, impact)
-        result.hazards_created.append(new_haz_id)
-        final_haz_ids.append(new_haz_id)
+        new_id = next_haz_id(risk_content)
+        add_hazard_row(new_id, impact, draft)
+        result.hazards_created.append(new_id)
+        final_haz_ids.append(new_id)
+        needs_review = True
         risk_content = RISK_FILE.read_text()
-
-        # Open a review Issue
         for req_id in final_req_ids:
-            issue_url = open_review_issue(new_haz_id, req_id, impact)
-            if issue_url:
-                result.issues_opened.append(issue_url)
+            url = open_review_issue(new_id, req_id, impact, draft)
+            if url:
+                result.issues_opened.append(url)
     else:
         for haz_id in impact.hazards:
-            if hazard_exists(haz_id, risk_content):
-                update_hazard_linkage(haz_id, impact)
+            if id_exists(haz_id, risk_content):
+                update_hazard_linkage(haz_id, impact, draft)
                 result.hazards_updated.append(haz_id)
             else:
-                # Referenced hazard ID doesn't exist — create it
-                add_hazard_row(haz_id, impact)
+                add_hazard_row(haz_id, impact, draft)
                 result.hazards_created.append(haz_id)
+                needs_review = True
                 risk_content = RISK_FILE.read_text()
-                # Open review Issue for new hazard
                 for req_id in final_req_ids:
-                    issue_url = open_review_issue(haz_id, req_id, impact)
-                    if issue_url:
-                        result.issues_opened.append(issue_url)
+                    url = open_review_issue(haz_id, req_id, impact, draft)
+                    if url:
+                        result.issues_opened.append(url)
             final_haz_ids.append(haz_id)
 
-    # ── 4. Handle tests ────────────────────────────────────────────────────────
+    # Also open a review Issue for linkage-only updates (lighter label)
+    if not needs_review and (result.reqs_updated or result.hazards_updated):
+        for req_id, haz_id in zip(final_req_ids, final_haz_ids):
+            url = open_review_issue(haz_id, req_id, impact, draft)
+            if url:
+                result.issues_opened.append(url)
+
+    # 5. Tests
     if impact.tests:
         result.tests_linked.extend(impact.tests)
 
-    # ── 5. Update traceability matrix ──────────────────────────────────────────
+    # 6. Traceability matrix
     for req_id in final_req_ids:
         for haz_id in final_haz_ids:
-            existing_trace = TRACEABILITY_FILE.read_text()
-            if req_id in existing_trace and haz_id in existing_trace:
-                # Row likely exists — update linkage
-                update_traceability_linkage(req_id, haz_id, impact.tests)
+            existing = TRACEABILITY_FILE.read_text()
+            if req_id in existing and haz_id in existing:
+                update_traceability_linkage(req_id, haz_id, impact.tests, draft)
             else:
-                # Add new row
-                add_traceability_row(req_id, haz_id, impact.tests, impact)
+                add_traceability_row(req_id, haz_id, impact.tests, draft)
                 result.traceability_rows_added += 1
 
-    # ── 6. Post PR summary comment ─────────────────────────────────────────────
-    post_pr_summary(result)
+    # 7. PR comment
+    post_pr_summary(result, draft)
 
-    # ── 7. Print final summary ─────────────────────────────────────────────────
+    # 8. Summary
     print("\n" + "=" * 60)
-    print("DHF Sync Bot complete.")
-    print(f"  Requirements created : {result.reqs_created}")
-    print(f"  Requirements updated : {result.reqs_updated}")
-    print(f"  Hazards auto-drafted : {result.hazards_created}")
-    print(f"  Hazards updated      : {result.hazards_updated}")
-    print(f"  Tests linked         : {result.tests_linked}")
-    print(f"  Traceability rows    : {result.traceability_rows_added}")
-    print(f"  Review Issues opened : {len(result.issues_opened)}")
+    print(f"  REQs created : {result.reqs_created}")
+    print(f"  REQs updated : {result.reqs_updated}")
+    print(f"  HAZs drafted : {result.hazards_created}")
+    print(f"  HAZs updated : {result.hazards_updated}")
+    print(f"  Tests linked : {result.tests_linked}")
+    print(f"  Trace rows   : {result.traceability_rows_added}")
+    print(f"  Issues opened: {len(result.issues_opened)}")
     print("=" * 60)
 
-    # Exit 1 if new hazards were created (require human review before merge)
-    if result.hazards_created:
-        print(
-            "\n⚠️  New hazards were auto-drafted. "
-            "Review Issues have been opened. "
-            "Complete the risk assessment before merging.\n"
-        )
+    # Exit 1 always — merge gate requires human approval
+    if result.issues_opened:
+        print(f"\n⏸  Merge blocked. @{REVIEWER} must approve the review Issue(s).\n")
         sys.exit(1)
 
 

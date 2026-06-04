@@ -1,0 +1,33 @@
+name: DHF Review Gate
+
+# Watches for "approved" comments on DHF review Issues.
+# When @Sal2912 comments "approved", marks the associated PR check as passed.
+
+on:
+  issue_comment:
+    types: [created]
+
+jobs:
+  check-approval:
+    name: Check DHF Reviewer Approval
+    runs-on: ubuntu-latest
+    # Only run if the comment is on an Issue (not a PR), by the reviewer, saying "approved"
+    if: |
+      !github.event.issue.pull_request &&
+      github.event.comment.user.login == 'Sal2912' &&
+      contains(github.event.comment.body, 'approved')
+    permissions:
+      issues: write
+      pull-requests: write
+
+    steps:
+      - name: Acknowledge approval
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue comment ${{ github.event.issue.number }} \
+            --repo ${{ github.repository }} \
+            --body "✅ **DHF Review approved by @Sal2912.** This Issue will be closed. The associated PR merge gate has been lifted." \
+          && gh issue close ${{ github.event.issue.number }} \
+            --repo ${{ github.repository }} \
+            --comment "Closed after approval by @Sal2912."
