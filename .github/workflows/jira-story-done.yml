@@ -1,0 +1,93 @@
+name: Jira Story Done — DHF Story Sync
+
+# Triggered by the Jira webhook when a story is marked Done.
+# Jira sends a POST to this workflow's repository_dispatch endpoint.
+#
+# Jira webhook configuration (set once in Jira admin):
+#   URL: https://api.github.com/repos/Sal2912/samd-dhf-template/dispatches
+#   Method: POST
+#   Headers:
+#     Authorization: Bearer <GITHUB_PAT_WITH_REPO_SCOPE>
+#     Content-Type: application/json
+#   Body template:
+#     {
+#       "event_type": "jira-story-done",
+#       "client_payload": {
+#         "story_id": "{{issue.key}}",
+#         "story_title": "{{issue.summary}}",
+#         "story_status": "{{issue.status.name}}"
+#       }
+#     }
+#   JQL filter: project = DHF AND status changed to Done
+#
+# Can also be triggered manually from the Actions tab for testing.
+
+on:
+  repository_dispatch:
+    types: [jira-story-done]
+  workflow_dispatch:
+    inputs:
+      story_id:
+        description: "Jira story ID (e.g. DHF-42)"
+        required: true
+        type: string
+
+jobs:
+  dhf-story-sync:
+    name: Story-Level DHF Sync (Claude)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write        # commit updated DHF docs
+      issues: write          # open review Issue
+      pull-requests: write   # optional PR comment
+
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install anthropic requests pyyaml
+
+      - name: Determine story ID
+        id: story
+        run: |
+          # Use webhook payload if available, otherwise use manual input
+          STORY_ID="${{ github.event.client_payload.story_id || inputs.story_id }}"
+          echo "story_id=$STORY_ID" >> $GITHUB_OUTPUT
+          echo "Story ID: $STORY_ID"
+
+      - name: Run DHF Story Sync Bot
+        env:
+          ANTHROPIC_API_KEY:  ${{ secrets.ANTHROPIC_API_KEY }}
+          JIRA_API_TOKEN:     ${{ secrets.JIRA_API_TOKEN }}
+          JIRA_EMAIL:         ${{ secrets.JIRA_EMAIL }}
+          GITHUB_TOKEN:       ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY:  ${{ github.repository }}
+          STORY_ID:           ${{ steps.story.outputs.story_id }}
+          JIRA_BASE_URL:      https://dhfgeneration.atlassian.net
+        run: python scripts/dhf_story_sync_bot.py
+
+      - name: Commit DHF document updates
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: |
+            chore(dhf): story-level DHF update for ${{ steps.story.outputs.story_id }} [skip ci]
+
+            Claude Haiku synthesized all task context into a single DHF update.
+            Awaiting @Sal2912 approval before LaunchDarkly flag can be enabled.
+          file_pattern: |
+            dhf/**/*.md
+            dhf/.story-context/*.json
+          commit_user_name: "GreyZone AI DHF Bot"
+          commit_user_email: "bot@greyzone-ai.com"
+
+      - name: Run traceability check
+        run: python scripts/check_traceability.py
+        continue-on-error: true   # placeholders expected until reviewer fills them in

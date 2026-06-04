@@ -1,33 +1,87 @@
 name: DHF Review Gate
 
-# Watches for "approved" comments on DHF review Issues.
-# When @Sal2912 comments "approved", marks the associated PR check as passed.
+# Watches for "approved" comments by @Sal2912 on DHF review Issues.
+# When approved:
+#   1. Closes the Issue
+#   2. Updates the story context JSON status → "dhf-approved"
+#   3. This unblocks the LaunchDarkly flag-enable gate
 
 on:
   issue_comment:
     types: [created]
 
 jobs:
-  check-approval:
-    name: Check DHF Reviewer Approval
+  process-approval:
+    name: Process DHF Approval
     runs-on: ubuntu-latest
-    # Only run if the comment is on an Issue (not a PR), by the reviewer, saying "approved"
     if: |
       !github.event.issue.pull_request &&
       github.event.comment.user.login == 'Sal2912' &&
       contains(github.event.comment.body, 'approved')
     permissions:
       issues: write
-      pull-requests: write
+      contents: write
 
     steps:
-      - name: Acknowledge approval
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract story ID from Issue title
+        id: story
+        run: |
+          ISSUE_TITLE="${{ github.event.issue.title }}"
+          STORY_ID=$(echo "$ISSUE_TITLE" | grep -oP 'DHF-\d+' | head -1)
+          echo "story_id=$STORY_ID" >> $GITHUB_OUTPUT
+          echo "Story ID extracted: $STORY_ID"
+
+      - name: Update story context to approved
+        if: steps.story.outputs.story_id != ''
+        run: |
+          python - <<'PYEOF'
+          import json, os, sys
+          from pathlib import Path
+          from datetime import date
+
+          story_id = "${{ steps.story.outputs.story_id }}"
+          ctx_path = Path(f"dhf/.story-context/{story_id}.json")
+
+          if not ctx_path.exists():
+              print(f"No context file for {story_id} — skipping status update")
+              sys.exit(0)
+
+          ctx = json.loads(ctx_path.read_text())
+          ctx["status"]       = "dhf-approved"
+          ctx["approved_by"]  = "Sal2912"
+          ctx["approved_at"]  = str(date.today())
+          ctx_path.write_text(json.dumps(ctx, indent=2))
+          print(f"✅ Story {story_id} status → dhf-approved")
+          PYEOF
+
+      - name: Commit approval status
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: |
+            chore(dhf): mark ${{ steps.story.outputs.story_id }} as dhf-approved [skip ci]
+
+            @Sal2912 approved DHF review Issue #${{ github.event.issue.number }}.
+            LaunchDarkly flag enable is now unblocked for this story.
+          file_pattern: "dhf/.story-context/*.json"
+          commit_user_name: "GreyZone AI DHF Bot"
+          commit_user_email: "bot@greyzone-ai.com"
+
+      - name: Close review Issue with approval confirmation
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh issue comment ${{ github.event.issue.number }} \
             --repo ${{ github.repository }} \
-            --body "✅ **DHF Review approved by @Sal2912.** This Issue will be closed. The associated PR merge gate has been lifted." \
+            --body "✅ **DHF Review approved by @Sal2912** on $(date +%Y-%m-%d).
+
+          Story **${{ steps.story.outputs.story_id }}** DHF record is now complete.
+          The LaunchDarkly flag-enable gate is unblocked — the flag-enable PR can now merge.
+
+          *GreyZone AI DHF Sync Bot*" \
           && gh issue close ${{ github.event.issue.number }} \
-            --repo ${{ github.repository }} \
-            --comment "Closed after approval by @Sal2912."
+            --repo ${{ github.repository }}

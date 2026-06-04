@@ -1,0 +1,63 @@
+name: Accumulate Task Context
+
+# Fires on every task PR merge to main.
+# Silently saves task context to dhf/.story-context/<STORY_ID>.json.
+# Does NOT update any DHF documents.
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+jobs:
+  accumulate:
+    name: Save Task Context
+    # Only run if PR was actually merged (not just closed)
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # commit the updated story context JSON
+
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests pyyaml
+
+      - name: Fetch PR diff
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          DIFF=$(gh pr diff ${{ github.event.pull_request.number }} \
+            --repo ${{ github.repository }} 2>/dev/null | head -c 4000 || echo "")
+          echo "PR_DIFF<<EOF" >> $GITHUB_ENV
+          echo "$DIFF" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+
+      - name: Accumulate task context
+        env:
+          GITHUB_TOKEN:      ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR_NUMBER:         ${{ github.event.pull_request.number }}
+          PR_TITLE:          ${{ github.event.pull_request.title }}
+          PR_BODY:           ${{ github.event.pull_request.body }}
+          PR_AUTHOR:         ${{ github.event.pull_request.user.login }}
+          PR_MERGED_AT:      ${{ github.event.pull_request.merged_at }}
+        run: python scripts/accumulate_task_context.py
+
+      - name: Commit story context update
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: |
+            chore(dhf): accumulate task context for PR #${{ github.event.pull_request.number }} [skip ci]
+          file_pattern: "dhf/.story-context/*.json"
+          commit_user_name: "GreyZone AI DHF Bot"
+          commit_user_email: "bot@greyzone-ai.com"
