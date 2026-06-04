@@ -39,9 +39,40 @@ tags: [risk, iso-14971, post-market]
 
 | Trigger | What Happens |
 |---|---|
+| **PR opened / edited** | **DHF Sync Bot** — reads the `## DHF Impact` block in the PR description and automatically updates requirements, hazards, traceability matrix; opens a review Issue if a new risk is introduced |
 | Push to `main` | Traceability check — ensures every requirement links to a test and a hazard |
 | Nightly (00:00 UTC) | Staleness check — opens a GitHub Issue for any section past its `review_interval_days` |
 | Manual dispatch | Metadata export — outputs `metadata-export.json` and `metadata-export.csv` |
+
+---
+
+## DHF Sync Bot — How It Works
+
+Every PR includes a structured `## DHF Impact` block (auto-populated from the PR template):
+
+```
+## DHF Impact
+REQ: REQ-001
+RISK: NEW
+TEST: TEST-007
+CHANGE: Added confidence threshold filter to reduce false positive rate
+NEW_REQ: (not applicable — existing requirement updated)
+RISK_JUSTIFICATION: (blank — new hazard required)
+```
+
+The bot then:
+
+| Condition | Bot Action |
+|---|---|
+| `REQ: REQ-XXX` exists | Updates linkage in design inputs doc |
+| `REQ: NEW` or ID not found | Creates new requirement row from PR context |
+| `RISK: H-XXX` exists | Updates linkage in risk management file |
+| `RISK: NEW` or no hazard linked | Auto-drafts new hazard, adds justification block, opens review Issue |
+| `TEST: TEST-XXX` present | Links test to requirement and hazard in traceability matrix |
+| Always | Updates `last_reviewed` in frontmatter of touched files |
+| New hazard created | **Blocks merge** until review Issue is resolved |
+
+All DHF document changes are committed back to the PR branch automatically. The traceability check then re-runs to confirm no gaps were introduced.
 
 ---
 
