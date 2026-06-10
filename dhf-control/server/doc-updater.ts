@@ -268,29 +268,40 @@ Format:
   storage.createReviewAction({ storyId, documentId: srsId, action: "ai_drafted", actor: "claude-haiku", comment: `Auto-drafted SRS entry for ${storyId}. Requires human review.`, createdAt: now });
   updated.push("SRS");
 
-  // 4. Update Traceability Matrix
-  const tmTpl = loadTemplate("TM-traceability-matrix.md");
-  const tmPrompt = `You are a medical device documentation assistant maintaining a Traceability Matrix for a SaMD product.
-
-A Jira story has just been closed. Add a new row for this story to the traceability matrix.
-
-STORY CONTEXT:
-${context}
-
-Instructions:
-- Return ONLY a single markdown table row to append to the matrix
-- Extract or infer: System Req ID (use Epic ID if available), SW Req ID (${storyId}), PR numbers, Test IDs (look for TEST- references in PRs), Hazard IDs (look for H- references)
-- Set Verification Status to "Pending" since tests need to be confirmed
-- If a field is unknown, use ⚠ Missing
-
-Format (single table row only):
-| [SysReqID] | ${storyId} | ${story.title} | ${story.epicId || "⚠ Missing"} | [PR numbers] | [TEST-IDs or ⚠ Missing] | [H-IDs or none] | Pending | [notes] |`;
-
-  const tmRow = await callClaude(tmPrompt);
-
+  // 4. Update Traceability Matrix — get existing rows first, then regenerate full table
   const tmId = getOrCreateDoc("traceability-matrix", "Traceability Matrix", "dhf-templates/TM-traceability-matrix.md", "quality");
   const tmDoc = storage.getDocument(tmId)!;
-  const tmContent = (tmDoc.content || tmTpl) + "\n\n<!-- AI Draft — Story " + storyId + " -->\n" + tmRow;
+
+  // Extract existing data rows (lines starting with | but not header/separator)
+  const existingTmRows = (tmDoc.content || "")
+    .split("\n")
+    .filter(l => l.startsWith("|") && !l.includes("---") && !l.includes("Sys Req") && !l.includes("SysReqID") && !l.includes("{{")
+      && l.replace(/\|/g, "").trim().length > 0);
+
+  const tmPrompt = `You are a medical device documentation assistant maintaining a Traceability Matrix for a SaMD product (IEC 62304, ISO 13485).
+
+Generate a complete, clean Traceability Matrix document in markdown.
+
+STORY BEING ADDED:
+${context}
+
+EXISTING TABLE ROWS (preserve these exactly, add new row for ${storyId}):
+${existingTmRows.join("\n") || "(none yet)"}
+
+Instructions:
+- Output the COMPLETE document — header, overview, full table, coverage summary, gaps section
+- For ${storyId}: infer System Req ID from Epic (${story.epicId || "SYS-TBD"}), extract PR numbers from context, set Test IDs to ⚠ TBD, set Hazard IDs to none unless clearly mentioned
+- Verification Status = Pending for new rows
+- Coverage summary: count rows and calculate percentages
+- Keep existing rows intact
+- Use clean pipe-table syntax with | aligned columns
+- Do NOT include any {{PLACEHOLDER}} text
+- Mark AI-generated fields with [AI] tag
+
+Today's date: ${now.split("T")[0]}
+Product: GreyZone AI SaMD`;
+
+  const tmContent = await callClaude(tmPrompt);
   const tmNewVer = bumpVersion(tmDoc.version);
   storage.updateDocument(tmId, { content: tmContent, version: tmNewVer, status: "draft", updatedAt: now });
   storage.createVersion({ documentId: tmId, version: tmNewVer, content: tmContent, changedBy: "claude-haiku", changeNote: `[AI] Traceability row added for ${storyId}`, storyId, createdAt: now });
@@ -309,29 +320,40 @@ Reply with ONLY: YES or NO, then one sentence explanation.`;
   const needsRisk = riskCheck.trim().toUpperCase().startsWith("YES");
 
   if (needsRisk) {
-    const raPrompt = `You are a medical device risk analyst maintaining a Risk Analysis per ISO 14971:2019.
-
-A Jira story closure has triggered a risk review. Add a new row to the risk register.
-
-STORY CONTEXT:
-${context}
-
-RISK ANALYST DECISION: ${riskCheck}
-
-Instructions:
-- Return ONLY a single markdown table row
-- Fill: Hazard ID (H-NEW-${storyId}), Source (${storyId}), Hazard Description, Hazardous Situation, Harm, Severity (1-5), Probability (1-5), Risk Level (Low/Medium/High/Critical), suggested Mitigation, Residual Risk, Status=Open
-- Base severity/probability on clinical context of the story
-- If uncertain, use conservative estimates (higher severity)
-
-Format (single table row only):
-| H-NEW-${storyId} | ${storyId} | [hazard] | [situation] | [harm] | [severity 1-5] | [prob 1-5] | [level] | [mitigation] | [residual] | Open |`;
-
-    const raRow = await callClaude(raPrompt);
     const raId = getOrCreateDoc("risk-analysis", "Risk Analysis", "dhf-templates/RA-risk-analysis.md", "quality");
     const raDoc = storage.getDocument(raId)!;
-    const raTpl = loadTemplate("RA-risk-analysis.md");
-    const raContent = (raDoc.content || raTpl) + "\n\n<!-- AI Draft — Story " + storyId + " -->\n" + raRow;
+
+    // Extract existing risk rows
+    const existingRaRows = (raDoc.content || "")
+      .split("\n")
+      .filter(l => l.startsWith("|") && !l.includes("---") && !l.includes("Hazard ID") && !l.includes("{{")
+        && l.replace(/\|/g, "").trim().length > 0);
+
+    const raPrompt = `You are a medical device risk analyst. Generate a complete, clean Risk Analysis document per ISO 14971:2019.
+
+STORY THAT TRIGGERED THIS UPDATE:
+${context}
+
+RISK ASSESSMENT: ${riskCheck}
+
+EXISTING RISK ROWS (preserve these exactly, add new row for ${storyId}):
+${existingRaRows.join("\n") || "(none yet)"}
+
+Instructions:
+- Output the COMPLETE document — all sections: General Info, Scope, Severity scale table, Probability scale table, Risk Level Matrix, Risk Register, AI Evaluation section, Risk-Benefit Summary, Revision History
+- For ${storyId}: create hazard ID H-${storyId}, fill all columns based on clinical context
+- Severity/probability: be conservative (patient safety first)
+- Risk Level = Severity × Probability mapped to Low/Medium/High/Critical
+- Use clean pipe-table syntax with | aligned columns
+- Do NOT include any {{PLACEHOLDER}} text — fill every field with real content or "N/A"
+- Mark AI-generated fields with [AI]
+- Risk Level cells: use bold for High/Critical (**High**, **Critical**)
+
+Today's date: ${now.split("T")[0]}
+Product: GreyZone AI SaMD
+Version: ${bumpVersion(raDoc.version)}`;
+
+    const raContent = await callClaude(raPrompt);
     const raNewVer = bumpVersion(raDoc.version);
     storage.updateDocument(raId, { content: raContent, version: raNewVer, status: "draft", updatedAt: now });
     storage.createVersion({ documentId: raId, version: raNewVer, content: raContent, changedBy: "claude-haiku", changeNote: `[AI] Risk row added for ${storyId}: ${riskCheck.slice(0, 100)}`, storyId, createdAt: now });
