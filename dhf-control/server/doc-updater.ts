@@ -362,37 +362,52 @@ The system shall [precise, testable requirement derived from story context]
     .filter(l => l.startsWith("|") && !l.includes("---") && !l.includes("Sys Req") && !l.includes("SysReqID") && !l.includes("{{")
       && l.replace(/\|/g, "").trim().length > 0);
 
-  const tmPrompt = `You are a senior regulatory affairs engineer maintaining a bidirectional Traceability Matrix for an FDA 510(k) submission (IEC 62304 §5.1, ISO 13485 §7.3, 21 CFR 820.30).
-
-PRODUCT CONTEXT:
-${PRODUCT_CONTEXT}
-
-Generate a complete, professionally formatted Traceability Matrix document in markdown.
+  const tmPrompt = `You are maintaining a Traceability Matrix for an FDA 510(k) SaMD submission.
 
 STORY BEING ADDED:
 ${context}
 
-EXISTING TABLE ROWS (preserve exactly, add new row for ${storyId}):
+EXISTING TABLE ROWS (preserve exactly as-is):
 ${existingTmRows.join("\n") || "(none yet)"}
 
-Instructions:
-- Output the COMPLETE document with all sections
-- ONLY include data that exists in the story context or existing rows — do not fabricate PR numbers, test IDs, or requirement IDs not mentioned
-- For ${storyId}:
-  * Sys Req ID: derive from Epic ID (${story.epicId || "SYS-TBD"}) + "-SYS-01" format (Epic is the PARENT of this story — use it as the system-level grouping)
-  * SW Req ID: ${storyId}
-  * GitHub PRs: extract numbers from context or write ⚠ TBD
-  * Test IDs: reference IEC 62304 unit/integration test naming (UT-${storyId}, IT-${storyId}) — mark as ⚠ TBD until verified
-  * Hazard IDs: link to H-${storyId} if risk was detected, else "none"
-  * Verification Status: Pending
-- Coverage Summary: calculate % based on row count
-- Gaps section: flag any missing test IDs or hazard links
-- Use clean pipe-table syntax, no {{PLACEHOLDER}} text
-- Mark AI-inferred fields with [AI]
-- Add a note at the top: "\u26a0 AI-generated draft. Requires QA review before approval."
+Your output must be EXACTLY this structure — two sections only, nothing else:
 
-Today's date: ${now.split("T")[0]}
-Document version: ${bumpVersion(tmDoc.version)}`;
+# Traceability Matrix
+**Document ID:** TM-001
+**Product:** NeuroScan AI
+**Status:** \`Draft\`
+
+---
+
+## 1. General Information
+
+| Field | Value |
+|---|---|
+| Product Name | NeuroScan AI |
+| Purpose | Bidirectional traceability from system requirements to tests |
+| Applicable Standards | IEC 62304 §5.1, ISO 13485 §7.3, FDA Design Controls 21 CFR 820.30 |
+
+---
+
+## 2. Traceability Matrix
+
+> ⚠ AI-generated draft. Requires QA review before approval.
+
+| Sys Req ID | SW Req ID (Jira) | Story Title | Epic ID | GitHub PR(s) | Test ID(s) | Hazard ID(s) | Verification Status |
+|---|---|---|---|---|---|---|---|
+[EXISTING ROWS HERE]
+| ${story.epicId ? story.epicId + "-SYS-01 [AI]" : "⚠ TBD"} | ${storyId} | ${story.title} | ${story.epicId || "⚠ TBD"} | ⚠ TBD | ⚠ TBD | ⚠ TBD | Pending |
+
+---
+
+*This matrix is maintained by the DHF Control sync system. All AI-populated fields are marked [AI] and require human review before approval.*
+
+Rules:
+- Replace [EXISTING ROWS HERE] with the existing rows provided above (preserve them exactly)
+- For the new row, only fill in values explicitly stated in the story context — use ⚠ TBD for everything else
+- If GitHub PR numbers are mentioned in the story context, include them — otherwise ⚠ TBD
+- Do NOT add any sections beyond 1 and 2
+- Do NOT add Coverage Summary, Gaps, Revision History, or any analysis sections`;
 
   const tmContent = await callClaude(tmPrompt);
   const tmNewVer = bumpVersion(tmDoc.version);
