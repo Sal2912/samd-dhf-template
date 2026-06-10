@@ -1,0 +1,102 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+@layer base {
+  :root {
+    /* Navy/slate precision palette — medical regulatory aesthetic */
+    --background: 222 47% 5%;
+    --foreground: 210 40% 96%;
+
+    --card: 222 47% 8%;
+    --card-foreground: 210 40% 96%;
+
+    --popover: 222 47% 8%;
+    --popover-foreground: 210 40% 96%;
+
+    --primary: 174 72% 40%;        /* teal accent */
+    --primary-foreground: 222 47% 5%;
+
+    --secondary: 222 30% 14%;
+    --secondary-foreground: 210 40% 80%;
+
+    --muted: 222 30% 12%;
+    --muted-foreground: 215 20% 55%;
+
+    --accent: 174 72% 40%;
+    --accent-foreground: 222 47% 5%;
+
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 210 40% 98%;
+
+    --border: 222 30% 16%;
+    --input: 222 30% 14%;
+    --ring: 174 72% 40%;
+
+    --radius: 0.5rem;
+
+    /* Status colors */
+    --status-active:   142 76% 36%;
+    --status-draft:    38 92% 50%;
+    --status-archived: 220 14% 46%;
+    --status-stale:    0 72% 51%;
+    --status-pending:  38 92% 50%;
+    --status-approved: 142 76% 36%;
+
+    /* Confidence */
+    --conf-high:   142 76% 36%;
+    --conf-medium: 38 92% 50%;
+    --conf-low:    0 72% 51%;
+  }
+
+  * { @apply border-border; box-sizing: border-box; }
+
+  html, body { height: 100%; overflow: hidden; margin: 0; }
+
+  body {
+    background-color: hsl(var(--background));
+    color: hsl(var(--foreground));
+    font-family: 'Inter', system-ui, sans-serif;
+    font-size: 14px;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* Monospace for IDs, versions, paths */
+  .mono { font-family: 'JetBrains Mono', monospace; }
+
+  /* Scrollbars */
+  ::-webkit-scrollbar { width: 4px; height: 4px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: hsl(var(--border)); border-radius: 2px; }
+  ::-webkit-scrollbar-thumb:hover { background: hsl(var(--muted-foreground)); }
+
+  /* Tabular numbers for data */
+  .tabular { font-variant-numeric: tabular-nums lining-nums; }
+
+  /* Status badges */
+  .badge-active    { @apply bg-green-950 text-green-400 border border-green-800; }
+  .badge-draft     { @apply bg-yellow-950 text-yellow-400 border border-yellow-800; }
+  .badge-archived  { @apply bg-slate-800 text-slate-400 border border-slate-700; }
+  .badge-stale     { @apply bg-red-950 text-red-400 border border-red-800; }
+  .badge-current   { @apply bg-green-950 text-green-400 border border-green-800; }
+  .badge-pending   { @apply bg-yellow-950 text-yellow-400 border border-yellow-800; }
+  .badge-approved  { @apply bg-teal-950 text-teal-400 border border-teal-800; }
+  .badge-ai        { @apply bg-purple-950 text-purple-400 border border-purple-800; }
+  .badge-accumulating { @apply bg-blue-950 text-blue-400 border border-blue-800; }
+  .badge-flag-enabled { @apply bg-green-950 text-green-400 border border-green-800; }
+  .badge-dhf-review-pending { @apply bg-yellow-950 text-yellow-400 border border-yellow-800; }
+  .badge-dhf-approved { @apply bg-teal-950 text-teal-400 border border-teal-800; }
+
+  /* Confidence */
+  .conf-high   { @apply text-green-400; }
+  .conf-medium { @apply text-yellow-400; }
+  .conf-low    { @apply text-red-400; }
+
+  /* Section card hover */
+  .section-card {
+    @apply rounded-lg border border-border bg-card transition-all duration-150;
+  }
+  .section-card:hover { @apply border-teal-800 bg-card; }
+}
