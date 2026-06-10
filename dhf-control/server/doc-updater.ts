@@ -223,6 +223,54 @@ function bumpVersion(v: string): string {
 
 // ── Story-close handler ────────────────────────────────────────────────────────
 
+
+// ── Story/Epic upsert helper ────────────────────────────────────────────────────
+
+function upsertStoryRow(data: {
+  storyId: string;
+  title: string;
+  issueType: "story" | "epic";
+  epicId?: string | null;
+  epicTitle?: string | null;
+  now: string;
+}) {
+  const existing = storage.getStory(data.storyId);
+  if (existing) {
+    storage.updateStory(data.storyId, {
+      title: data.title,
+      issueType: data.issueType,
+      epicId: data.epicId ?? null,
+      epicTitle: data.epicTitle ?? null,
+      status: existing.status === "accumulating" ? "dhf-review-pending" : existing.status,
+      updatedAt: data.now,
+    });
+  } else {
+    storage.createStory({
+      storyId: data.storyId,
+      title: data.title,
+      issueType: data.issueType,
+      epicId: data.epicId ?? null,
+      epicTitle: data.epicTitle ?? null,
+      status: "dhf-review-pending",
+      taskCount: 0,
+      approvedBy: null,
+      approvedAt: null,
+      issueUrl: `https://dhfgeneration.atlassian.net/browse/${data.storyId}`,
+      flagKey: null,
+      flagEnabledAt: null,
+      allReqIds: "[]",
+      allHazIds: "[]",
+      allTestIds: "[]",
+      claudeConfidence: null,
+      claudeReasoning: null,
+      draftedReqId: null,
+      draftedHazId: null,
+      createdAt: data.now,
+      updatedAt: data.now,
+    });
+  }
+}
+
 export async function handleStoryClosed(storyId: string): Promise<{ updated: string[]; skipped: string[] }> {
   const updated: string[] = [];
   const skipped: string[] = [];
@@ -231,6 +279,9 @@ export async function handleStoryClosed(storyId: string): Promise<{ updated: str
   // 1. Fetch Jira story details
   const story = await getJiraStory(storyId);
   if (!story) { skipped.push("all — could not fetch Jira story"); return { updated, skipped }; }
+
+  // 1b. Upsert story row with parent epic info
+  upsertStoryRow({ storyId, title: story.title, issueType: "story", epicId: story.epicId, epicTitle: story.epicTitle, now });
 
   // 2. Fetch linked GitHub PRs
   const prs = await getPRsForStory(storyId);
@@ -325,7 +376,7 @@ ${existingTmRows.join("\n") || "(none yet)"}
 Instructions:
 - Output the COMPLETE document with all sections
 - For ${storyId}:
-  * Sys Req ID: derive from Epic ID (${story.epicId || "SYS-TBD"}) + "-SYS-01" format
+  * Sys Req ID: derive from Epic ID (${story.epicId || "SYS-TBD"}) + "-SYS-01" format (Epic is the PARENT of this story — use it as the system-level grouping)
   * SW Req ID: ${storyId}
   * GitHub PRs: extract numbers from context or write ⚠ TBD
   * Test IDs: reference IEC 62304 unit/integration test naming (UT-${storyId}, IT-${storyId}) — mark as ⚠ TBD until verified
@@ -438,6 +489,9 @@ export async function handleEpicClosed(epicId: string): Promise<{ updated: strin
   // 1. Fetch epic + all stories
   const epic = await getJiraEpic(epicId);
   if (!epic) { skipped.push("all — could not fetch Jira epic"); return { updated, skipped }; }
+
+  // 1b. Upsert epic row in DB
+  upsertStoryRow({ storyId: epicId, title: epic.title, issueType: "epic", epicId: null, epicTitle: null, now });
 
   const storyList = epic.stories.map((s: any) => `- ${s.id}: ${s.title} (${s.status})`).join("\n");
 

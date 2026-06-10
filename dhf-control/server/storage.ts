@@ -49,6 +49,9 @@ sqlite.exec(`
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     story_id TEXT NOT NULL UNIQUE,
     title TEXT,
+    issue_type TEXT NOT NULL DEFAULT 'story',
+    epic_id TEXT,
+    epic_title TEXT,
     status TEXT NOT NULL DEFAULT 'accumulating',
     task_count INTEGER NOT NULL DEFAULT 0,
     approved_by TEXT,
@@ -66,6 +69,8 @@ sqlite.exec(`
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
   );
+
+
 
   CREATE TABLE IF NOT EXISTS story_tasks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -89,6 +94,15 @@ sqlite.exec(`
     created_at TEXT NOT NULL
   );
 `);
+
+// Safe column migrations — ALTER TABLE ignores errors if column already exists
+for (const stmt of [
+  "ALTER TABLE stories ADD COLUMN issue_type TEXT NOT NULL DEFAULT 'story'",
+  "ALTER TABLE stories ADD COLUMN epic_id TEXT",
+  "ALTER TABLE stories ADD COLUMN epic_title TEXT",
+]) {
+  try { sqlite.exec(stmt); } catch { /* column already exists */ }
+}
 
 export interface IStorage {
   // Documents

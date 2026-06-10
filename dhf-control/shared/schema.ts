@@ -40,6 +40,9 @@ export const stories = sqliteTable("stories", {
   id:              integer("id").primaryKey({ autoIncrement: true }),
   storyId:         text("story_id").notNull().unique(),    // e.g. DHF-42
   title:           text("title"),
+  issueType:       text("issue_type").notNull().default("story"), // story | epic
+  epicId:          text("epic_id"),          // parent epic Jira key (null for epics)
+  epicTitle:       text("epic_title"),       // parent epic title (for display)
   status:          text("status").notNull().default("accumulating"),
   // accumulating | dhf-review-pending | dhf-approved | flag-enabled
   taskCount:       integer("task_count").notNull().default(0),
