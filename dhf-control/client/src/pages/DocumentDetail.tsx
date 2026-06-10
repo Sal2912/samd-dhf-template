@@ -1,10 +1,12 @@
 import { useState } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { useParams, Link } from "wouter";
-import { ArrowLeft, Save, History, Tag, Clock, User, Brain } from "lucide-react";
+import { ArrowLeft, Save, History, Tag, Brain } from "lucide-react";
 import { queryClient, apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import type { DhfDocument, DocumentVersion } from "@shared/schema";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 function VersionBadge({ v, current }: { v: DocumentVersion; current: boolean }) {
   return (
@@ -146,8 +148,46 @@ export default function DocumentDetail() {
               spellCheck={false}
             />
           ) : (
-            <div className="bg-muted rounded-lg border border-border p-5">
-              <pre className="text-sm text-foreground mono whitespace-pre-wrap leading-relaxed">{doc.content || "No content yet."}</pre>
+            <div className="bg-card rounded-lg border border-border p-6 prose-doc">
+              {doc.content ? (
+                <ReactMarkdown
+                  remarkPlugins={[remarkGfm]}
+                  components={{
+                    h1: ({children}) => <h1 className="text-xl font-bold text-foreground border-b border-border pb-2 mb-4 mt-0">{children}</h1>,
+                    h2: ({children}) => <h2 className="text-base font-semibold text-foreground border-b border-border pb-1 mb-3 mt-6">{children}</h2>,
+                    h3: ({children}) => <h3 className="text-sm font-semibold text-foreground mb-2 mt-5">{children}</h3>,
+                    h4: ({children}) => <h4 className="text-sm font-medium text-teal-600 mb-2 mt-4">{children}</h4>,
+                    p: ({children}) => <p className="text-sm text-foreground leading-relaxed mb-3">{children}</p>,
+                    a: ({href, children}) => <a href={href} target="_blank" rel="noreferrer" className="text-teal-600 hover:underline">{children}</a>,
+                    strong: ({children}) => <strong className="font-semibold text-foreground">{children}</strong>,
+                    em: ({children}) => <em className="text-muted-foreground italic">{children}</em>,
+                    code: ({children, className}) => {
+                      const isBlock = className?.includes('language-');
+                      return isBlock
+                        ? <code className="block bg-muted rounded p-3 text-xs mono text-foreground overflow-x-auto mb-3">{children}</code>
+                        : <code className="bg-muted px-1.5 py-0.5 rounded text-xs mono text-teal-600">{children}</code>;
+                    },
+                    table: ({children}) => (
+                      <div className="overflow-x-auto mb-4">
+                        <table className="w-full text-sm border-collapse">{children}</table>
+                      </div>
+                    ),
+                    thead: ({children}) => <thead className="bg-muted">{children}</thead>,
+                    th: ({children}) => <th className="text-left text-xs font-semibold text-muted-foreground uppercase tracking-wide px-3 py-2 border border-border">{children}</th>,
+                    td: ({children}) => <td className="px-3 py-2 text-sm text-foreground border border-border align-top">{children}</td>,
+                    tr: ({children}) => <tr className="hover:bg-muted/50 transition-colors">{children}</tr>,
+                    ul: ({children}) => <ul className="list-disc list-inside text-sm text-foreground space-y-1 mb-3 pl-2">{children}</ul>,
+                    ol: ({children}) => <ol className="list-decimal list-inside text-sm text-foreground space-y-1 mb-3 pl-2">{children}</ol>,
+                    li: ({children}) => <li className="text-sm text-foreground leading-relaxed">{children}</li>,
+                    blockquote: ({children}) => <blockquote className="border-l-4 border-teal-500 pl-4 italic text-muted-foreground my-3">{children}</blockquote>,
+                    hr: () => <hr className="border-border my-6" />,
+                  }}
+                >
+                  {doc.content}
+                </ReactMarkdown>
+              ) : (
+                <p className="text-sm text-muted-foreground italic">No content yet.</p>
+              )}
             </div>
           )}
         </div>
