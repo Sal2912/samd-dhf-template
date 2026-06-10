@@ -5,7 +5,7 @@ import { queryClient, apiRequest } from "@/lib/queryClient";
 import {
   ArrowLeft, CheckCircle, XCircle, MessageSquare, Zap,
   GitBranch, Package, Clock, AlertTriangle, ExternalLink,
-  ChevronDown, ChevronUp, Brain, ShieldCheck,
+  ChevronDown, ChevronUp, Brain, ShieldCheck, Wand2, FileText,
 } from "lucide-react";
 import { Link } from "wouter";
 import { useToast } from "@/hooks/use-toast";
@@ -140,6 +140,17 @@ function ActionTimeline({ actions }: { actions: ReviewAction[] }) {
 function ReviewPanel({ storyId, status }: { storyId: string; status: string }) {
   const [comment, setComment] = useState("");
   const [showCommentBox, setShowCommentBox] = useState<"approve" | "changes" | null>(null);
+  const [triggerResult, setTriggerResult] = useState<{ updated: string[]; skipped: string[] } | null>(null);
+
+  const triggerMutation = useMutation({
+    mutationFn: () => apiRequest("POST", `/api/trigger/story/${storyId}`, {}),
+    onSuccess: (data: any) => {
+      setTriggerResult(data);
+      queryClient.invalidateQueries({ queryKey: ["/api/documents"] });
+      toast({ title: "DHF docs updated", description: `Updated: ${data.updated?.join(", ") || "none"}` });
+    },
+    onError: () => toast({ title: "Trigger failed", description: "Could not run doc update. Check API keys.", variant: "destructive" }),
+  });
   const { toast } = useToast();
 
   const approveMutation = useMutation({
@@ -293,6 +304,40 @@ function ReviewPanel({ storyId, status }: { storyId: string; status: string }) {
           </div>
         </div>
       )}
+
+      {/* DHF Doc Trigger */}
+      <div className="mt-4 pt-4 border-t border-border">
+        <div className="flex items-center justify-between mb-2">
+          <div className="flex items-center gap-2">
+            <Wand2 size={14} className="text-teal-600" />
+            <span className="text-sm font-medium text-foreground">Auto-update DHF Documents</span>
+          </div>
+          <button
+            data-testid="btn-trigger-docs"
+            onClick={() => triggerMutation.mutate()}
+            disabled={triggerMutation.isPending}
+            className="flex items-center gap-2 px-3 py-1.5 rounded-md bg-teal-600 hover:bg-teal-500 text-white text-xs font-medium transition-colors disabled:opacity-50"
+          >
+            <Wand2 size={12} />
+            {triggerMutation.isPending ? "Updating docs…" : "Trigger Doc Update"}
+          </button>
+        </div>
+        <p className="text-xs text-muted-foreground mb-2">
+          Claude Haiku fetches this story from Jira + GitHub and updates SRS, Traceability Matrix, and Risk Analysis.
+        </p>
+        {triggerResult && (
+          <div className="rounded-md bg-muted border border-border px-3 py-2 text-xs space-y-1">
+            <div className="flex items-center gap-1 text-green-600 font-medium">
+              <CheckCircle size={11} /> Updated: {triggerResult.updated.join(", ") || "none"}
+            </div>
+            {triggerResult.skipped.length > 0 && (
+              <div className="flex items-center gap-1 text-muted-foreground">
+                <FileText size={11} /> Skipped: {triggerResult.skipped.join(", ")}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
