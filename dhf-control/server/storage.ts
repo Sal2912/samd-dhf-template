@@ -182,8 +182,8 @@ export const storage: IStorage = {
 
   // ── Seed ─────────────────────────────────────────────────────────────────────
   seedIfEmpty() {
-    const existing = db.select().from(dhfDocuments).all();
-    if (existing.length > 0) return;
+    // Seed data removed — app starts empty and populates via Jira/GitHub sync
+    return;
 
     const now = new Date().toISOString();
     const today = now.split("T")[0];
