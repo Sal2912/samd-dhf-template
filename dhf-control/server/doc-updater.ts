@@ -450,40 +450,61 @@ Reply with ONLY: YES or NO, then one precise sentence naming the specific risk c
       .filter(l => l.startsWith("|") && !l.includes("---") && !l.includes("Hazard ID") && !l.includes("{{")
         && l.replace(/\|/g, "").trim().length > 0);
 
-    const raPrompt = `You are a senior risk management engineer. Generate a complete, professional Risk Analysis document per ISO 14971:2019 for an FDA 510(k) submission.
-
-PRODUCT CONTEXT:
-${PRODUCT_CONTEXT}
+    const raPrompt = `You are maintaining a Risk Analysis document per ISO 14971:2019 for an FDA 510(k) SaMD submission.
 
 STORY THAT TRIGGERED THIS UPDATE:
 ${context}
 
-RISK ASSESSMENT DECISION: ${riskCheck}
+RISK ASSESSMENT REASON: ${riskCheck}
 
-EXISTING RISK ROWS (preserve exactly, add new row for ${storyId}):
+EXISTING RISK ROWS (preserve exactly as-is):
 ${existingRaRows.join("\n") || "(none yet)"}
 
-Instructions:
-- Output the COMPLETE document with ALL sections — do not truncate the table mid-row
-- Base ALL hazard descriptions on the actual story context provided — do not invent clinical scenarios not derivable from the story
-- For the new hazard (H-${storyId}):
-  * Hazard Description: the technical root cause (e.g. "Confidence threshold miscalibration")
-  * Hazardous Situation: the clinical scenario (e.g. "Radiologist presented with high-confidence score for false negative detection")
-  * Harm: specific patient outcome (e.g. "Delayed diagnosis of malignant glioma leading to disease progression")
-  * Severity: use ISO 14971 scale 1-5. Brain tumor misdiagnosis = 4 (Critical) or 5 (Catastrophic) by default
-  * Probability: assess based on how often this code path executes in clinical use
-  * Risk Level: Severity × Probability → Low / Medium / **High** / **Critical**
-  * Mitigation: specific, implementable controls (e.g. "Mandatory confidence threshold warning UI", "Radiologist override required for low-confidence results", "IEC 62304 unit test coverage ≥95%")
-  * Residual Risk: after mitigation, reassess level
-- All High/Critical risks must have mitigations — no exceptions
-- Severity/probability: be conservative. When in doubt, go higher.
-- Use bold for **High** and **Critical** risk levels in the table
-- Do NOT include any {{PLACEHOLDER}} text — every field must have real content
-- Mark AI-generated fields with [AI]
-- Add reviewer note: "⚠ AI-generated draft. Risk entries must be reviewed by a qualified risk management engineer before approval."
+Your output must be EXACTLY this structure — two sections only, nothing else:
 
-Today's date: ${now.split("T")[0]}
-Document version: ${bumpVersion(raDoc.version)}`;
+# Risk Analysis
+**Document ID:** RA-001
+**Product:** NeuroScan AI
+**Status:** \`Draft\`
+**Standard:** ISO 14971:2019
+
+---
+
+## 1. General Information
+
+| Field | Value |
+|---|---|
+| Product Name | NeuroScan AI |
+| Applicable Standards | ISO 14971:2019, IEC 62304, FDA Guidance on Software as a Medical Device |
+| Severity Scale | 1 (Negligible) → 5 (Catastrophic) per ISO 14971 |
+| Probability Scale | 1 (Improbable) → 5 (Frequent) per ISO 14971 |
+
+---
+
+## 2. Risk Register
+
+> ⚠ AI-generated draft. Risk entries must be reviewed by a qualified risk management engineer before approval.
+
+| Hazard ID | Source (Jira ID) | Hazard Description | Hazardous Situation | Harm | Severity | Probability | Risk Level | Mitigation | Residual Risk | Status |
+|---|---|---|---|---|---|---|---|---|---|---|
+[EXISTING ROWS HERE]
+| H-${storyId} [AI] | ${storyId} | [derive from story context only] | [clinical scenario from story context] | [patient harm from story context] | [4 or 5 for brain tumor — be conservative] | [assess from story] | [Severity x Probability] | [specific control from story context] | [after mitigation] | Open |
+
+---
+
+*This document is maintained by the DHF Control sync system. AI-assisted risk entries are marked [AI] and require human review before approval.*
+
+Rules:
+- Replace [EXISTING ROWS HERE] with the existing rows provided above (preserve them exactly)
+- Fill in the new row using ONLY information from the story context — no invented clinical details
+- Hazard Description: the technical root cause stated or implied in the story
+- Hazardous Situation: the clinical scenario that could result
+- Harm: specific patient outcome
+- Severity: 4 (Critical) or 5 (Catastrophic) for brain tumor misdiagnosis scenarios — be conservative
+- Mitigation: only mitigations mentioned or directly implied by the story implementation
+- Use ⚠ TBD for any field that cannot be derived from the story context
+- Do NOT add any sections beyond 1 and 2
+- Do NOT add Severity scales, Probability scales, Risk matrices, AI Assessment tables, Revision History, or any other sections`;
 
     const raContent = await callClaude(raPrompt);
     const raNewVer = bumpVersion(raDoc.version);
