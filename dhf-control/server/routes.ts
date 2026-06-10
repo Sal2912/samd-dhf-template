@@ -2,6 +2,7 @@ import type { Express } from "express";
 import { type Server } from "http";
 import { storage } from "./storage";
 import { syncAll, syncJira, syncGitHub, syncState } from "./sync";
+import { handleStoryClosed, handleEpicClosed } from "./doc-updater";
 
 export async function registerRoutes(httpServer: Server, app: Express): Promise<Server> {
   storage.seedIfEmpty();
@@ -150,6 +151,61 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   app.post("/api/sync/github", async (_req, res) => {
     const result = await syncGitHub();
     res.json(result);
+  });
+
+  // ── Jira Webhook ──────────────────────────────────────────────────────────────
+  // POST /api/webhook/jira — receives Jira issue transitions
+  app.post("/api/webhook/jira", async (req, res) => {
+    try {
+      const event = req.body;
+      const issueType = event?.issue?.fields?.issuetype?.name?.toLowerCase() || "";
+      const status = event?.issue?.fields?.status?.name?.toLowerCase() || "";
+      const issueKey = event?.issue?.key || "";
+      const transition = event?.transition?.to?.name?.toLowerCase() || "";
+
+      const isClosed = status.includes("done") || status.includes("closed") || status.includes("resolved")
+        || transition.includes("done") || transition.includes("closed");
+
+      if (!issueKey || !isClosed) {
+        return res.json({ ignored: true, reason: "Not a close event" });
+      }
+
+      // Respond immediately — processing happens async
+      res.json({ received: true, issueKey, issueType });
+
+      if (issueType === "epic") {
+        console.log(`[webhook] Epic closed: ${issueKey}`);
+        handleEpicClosed(issueKey).then(r => console.log(`[webhook] Epic ${issueKey} done:`, r)).catch(console.error);
+      } else if (issueType === "story" || issueType === "bug" || issueType === "task") {
+        console.log(`[webhook] Story closed: ${issueKey}`);
+        handleStoryClosed(issueKey).then(r => console.log(`[webhook] Story ${issueKey} done:`, r)).catch(console.error);
+      }
+    } catch (e: any) {
+      console.error("[webhook] Error:", e.message);
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // POST /api/trigger/story/:storyId — manual trigger for testing
+  app.post("/api/trigger/story/:storyId", async (req, res) => {
+    const { storyId } = req.params;
+    try {
+      const result = await handleStoryClosed(storyId);
+      res.json({ success: true, storyId, ...result });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // POST /api/trigger/epic/:epicId — manual trigger for testing
+  app.post("/api/trigger/epic/:epicId", async (req, res) => {
+    const { epicId } = req.params;
+    try {
+      const result = await handleEpicClosed(epicId);
+      res.json({ success: true, epicId, ...result });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
   });
 
   // ── Dashboard stats ───────────────────────────────────────────────────────────

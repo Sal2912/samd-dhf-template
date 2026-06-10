@@ -76,6 +76,7 @@ jobs:
               -e JIRA_PROJECT_KEY="${{ secrets.JIRA_PROJECT_KEY }}" \
               -e GITHUB_TOKEN="${{ secrets.DEPLOY_GITHUB_TOKEN }}" \
               -e GITHUB_REPO="Sal2912/samd-dhf-template" \
+              -e ANTHROPIC_API_KEY="${{ secrets.ANTHROPIC_API_KEY }}" \
               ghcr.io/sal2912/dhf-control:latest
 
             # Quick health check
