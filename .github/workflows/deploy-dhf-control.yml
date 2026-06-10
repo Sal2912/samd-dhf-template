@@ -13,6 +13,10 @@ jobs:
     name: Build → Push image → SSH deploy
     runs-on: ubuntu-latest
 
+    permissions:
+      contents: read
+      packages: write
+
     env:
       IMAGE: ghcr.io/sal2912/dhf-control
 
