@@ -26,6 +26,38 @@ const GH_REPO      = process.env.GITHUB_REPO       || "Sal2912/samd-dhf-template
 const CLAUDE_KEY   = process.env.ANTHROPIC_API_KEY || "";
 const CLAUDE_MODEL = "claude-haiku-4-5";
 
+// ── Product Context (used in all prompts) ──────────────────────────────────────
+// Update this block to match your actual product. This context is injected into
+// every Claude prompt to ensure domain-accurate, regulatory-grade output.
+const PRODUCT_CONTEXT = `
+PRODUCT: NeuroScan AI
+CATEGORY: Software as a Medical Device (SaMD) — AI/ML-based Computer-Aided Detection (CADe)
+FUNCTION: Deep learning model that analyzes brain MRI images (T1, T2, FLAIR sequences) to 
+  automatically detect and localize intracranial tumors (gliomas, meningiomas, metastases).
+  The system outputs a bounding box overlay, tumor probability score (0-100%), and confidence 
+  level for each detected region. Results are presented as a secondary read — the radiologist 
+  makes the final diagnostic decision.
+INTENDED USE: Assist radiologists in detecting brain tumors in adult patients (18+) undergoing 
+  routine or follow-up MRI brain scans in hospital radiology departments.
+INTENDED USER: Licensed radiologists and neuroradiologists in clinical settings.
+USE ENVIRONMENT: Hospital PACS/RIS integrated workstation, connected to MRI scanner DICOM output.
+REGULATORY PATHWAY: FDA 510(k) predicate-based clearance (predicate: existing CADe devices), 
+  CE Mark Class IIb under MDR 2017/745, ISO 13485 QMS.
+APPLICABLE STANDARDS: IEC 62304 (SW lifecycle), ISO 14971 (risk mgmt), IEC 62366 (usability), 
+  ISO 13485 (QMS), DICOM, HL7 FHIR, FDA AI/ML-Based SaMD Action Plan.
+KEY SAFETY CONCERNS:
+  1. FALSE NEGATIVES — algorithm misses a tumor → delayed diagnosis → patient harm
+  2. FALSE POSITIVES — algorithm flags normal tissue → unnecessary biopsy/intervention
+  3. ALGORITHM BIAS — underperformance on underrepresented MRI scanners, patient demographics, 
+     or rare tumor subtypes
+  4. CONFIDENCE MISINTERPRETATION — radiologist over-relies on AI score, abandons independent read
+  5. DICOM/PACS INTEGRATION FAILURE — images not transmitted correctly → wrong patient data
+  6. MODEL DRIFT — algorithm degrades over time as scanner hardware or protocols change
+  7. CYBERSECURITY — unauthorized model access or manipulation of AI output
+CRITICAL REQUIREMENT: The system must NEVER suppress or replace the radiologist's independent 
+  judgment. All AI outputs are advisory only and must be clearly labeled as such in the UI.
+`.trim();
+
 // ── Template loader ────────────────────────────────────────────────────────────
 function loadTemplate(name: string): string {
   try {
@@ -217,44 +249,43 @@ ${prSummary || "No merged PRs found"}
 
   // 3. Update SRS — add/update story entry
   const srsTpl = loadTemplate("SRS-software-requirements.md");
-  const srsPrompt = `You are a medical device documentation assistant helping maintain a Software Requirements Specification (SRS) for a SaMD product regulated under IEC 62304 and ISO 13485.
+  const srsPrompt = `You are a senior regulatory affairs engineer writing a Software Requirements Specification (SRS) for an FDA 510(k) submission under IEC 62304 and ISO 13485.
 
-A Jira story has just been closed. Add or update the entry for this story in the SRS document.
+PRODUCT CONTEXT:
+${PRODUCT_CONTEXT}
+
+A Jira story has just been closed. Write the SRS entry for this story.
 
 STORY CONTEXT:
 ${context}
 
-CURRENT SRS TEMPLATE:
-${srsTpl}
-
 Instructions:
-- Write ONLY the new story block to insert/update under the correct Epic section
-- Use the Jira story ID (${storyId}) as the requirement ID
-- Fill in Requirement Statement from the story description
-- Fill in Acceptance Criteria from any "acceptance criteria" or "done" criteria you can infer
-- Set Type to Functional, Non-Functional, Safety, or Interface based on context
-- Keep it concise — 3-5 sentences max per field
-- Return ONLY the markdown block for this story, no extra explanation
+- Write ONLY the story block for ${storyId} — no preamble, no explanation
+- Requirement Statement: precise, testable, written in "The system shall..." format
+- Acceptance Criteria: specific, measurable conditions a QA engineer can verify
+- Type: Safety if it touches AI output, confidence scoring, DICOM, or patient data; Functional for core features; Interface for PACS/DICOM/HL7; Non-Functional for performance/security
+- Consider the product's key safety concerns (false negatives, algorithm bias, DICOM failures) when writing the requirement
+- Keep each field to 2-4 sentences. Be precise, not verbose.
+- Return ONLY the markdown block, no extra text
 
-Format:
 #### ${storyId} — ${story.title}
 
 | Field | Value |
 |---|---|
 | Requirement ID | ${storyId} |
-| Type | [type] |
+| Type | [Safety / Functional / Interface / Non-Functional] |
 | Priority | ${story.priority} |
 | Status | Draft |
 | Source | https://dhfgeneration.atlassian.net/browse/${storyId} |
 
 **Requirement Statement:**
-[statement]
+The system shall [precise, testable requirement derived from story context]
 
 **Acceptance Criteria:**
-[criteria]
+[2-4 specific, measurable acceptance criteria a QA engineer can verify]
 
 **Notes / Constraints:**
-[notes or "None"]`;
+[Any safety constraints, regulatory notes, or algorithm-specific considerations. Reference relevant standard if applicable.]`;
 
   const srsBlock = await callClaude(srsPrompt);
 
@@ -278,28 +309,36 @@ Format:
     .filter(l => l.startsWith("|") && !l.includes("---") && !l.includes("Sys Req") && !l.includes("SysReqID") && !l.includes("{{")
       && l.replace(/\|/g, "").trim().length > 0);
 
-  const tmPrompt = `You are a medical device documentation assistant maintaining a Traceability Matrix for a SaMD product (IEC 62304, ISO 13485).
+  const tmPrompt = `You are a senior regulatory affairs engineer maintaining a bidirectional Traceability Matrix for an FDA 510(k) submission (IEC 62304 §5.1, ISO 13485 §7.3, 21 CFR 820.30).
 
-Generate a complete, clean Traceability Matrix document in markdown.
+PRODUCT CONTEXT:
+${PRODUCT_CONTEXT}
+
+Generate a complete, professionally formatted Traceability Matrix document in markdown.
 
 STORY BEING ADDED:
 ${context}
 
-EXISTING TABLE ROWS (preserve these exactly, add new row for ${storyId}):
+EXISTING TABLE ROWS (preserve exactly, add new row for ${storyId}):
 ${existingTmRows.join("\n") || "(none yet)"}
 
 Instructions:
-- Output the COMPLETE document — header, overview, full table, coverage summary, gaps section
-- For ${storyId}: infer System Req ID from Epic (${story.epicId || "SYS-TBD"}), extract PR numbers from context, set Test IDs to ⚠ TBD, set Hazard IDs to none unless clearly mentioned
-- Verification Status = Pending for new rows
-- Coverage summary: count rows and calculate percentages
-- Keep existing rows intact
-- Use clean pipe-table syntax with | aligned columns
-- Do NOT include any {{PLACEHOLDER}} text
-- Mark AI-generated fields with [AI] tag
+- Output the COMPLETE document with all sections
+- For ${storyId}:
+  * Sys Req ID: derive from Epic ID (${story.epicId || "SYS-TBD"}) + "-SYS-01" format
+  * SW Req ID: ${storyId}
+  * GitHub PRs: extract numbers from context or write ⚠ TBD
+  * Test IDs: reference IEC 62304 unit/integration test naming (UT-${storyId}, IT-${storyId}) — mark as ⚠ TBD until verified
+  * Hazard IDs: link to H-${storyId} if risk was detected, else "none"
+  * Verification Status: Pending
+- Coverage Summary: calculate % based on row count
+- Gaps section: flag any missing test IDs or hazard links
+- Use clean pipe-table syntax, no {{PLACEHOLDER}} text
+- Mark AI-inferred fields with [AI]
+- Add a note at the top: "\u26a0 AI-generated draft. Requires QA review before approval."
 
 Today's date: ${now.split("T")[0]}
-Product: GreyZone AI SaMD`;
+Document version: ${bumpVersion(tmDoc.version)}`;
 
   const tmContent = await callClaude(tmPrompt);
   const tmNewVer = bumpVersion(tmDoc.version);
@@ -309,12 +348,25 @@ Product: GreyZone AI SaMD`;
   updated.push("TM");
 
   // 5. Risk Analysis — only if Claude detects a risk signal
-  const riskCheckPrompt = `You are a SaMD risk analyst. Based on the following story context, does this change introduce or modify a clinical/patient safety risk that should be documented in the Risk Analysis?
+  const riskCheckPrompt = `You are a senior risk management engineer for an AI-based brain tumor detection SaMD, regulated under ISO 14971:2019 and FDA guidance on AI/ML-based SaMD.
+
+PRODUCT CONTEXT:
+${PRODUCT_CONTEXT}
+
+A Jira story was just closed. Determine whether this change introduces or modifies a risk that must be documented in the Risk Analysis.
 
 STORY CONTEXT:
 ${context}
 
-Reply with ONLY: YES or NO, then one sentence explanation.`;
+Evaluate against these specific risk categories for this product:
+1. Does it affect AI model output, confidence scores, or detection thresholds? (false negative/positive risk)
+2. Does it change how results are displayed to the radiologist? (confidence misinterpretation risk)
+3. Does it touch DICOM ingestion, patient data, or image preprocessing? (data integrity / wrong patient risk)
+4. Does it modify algorithm behavior, training data, or model versioning? (algorithm bias / model drift risk)
+5. Does it affect system access controls or data transmission? (cybersecurity risk)
+6. Does it change any safety-critical UI element or workflow step? (use error risk per IEC 62366)
+
+Reply with ONLY: YES or NO, then one precise sentence naming the specific risk category and mechanism.`;
 
   const riskCheck = await callClaude(riskCheckPrompt);
   const needsRisk = riskCheck.trim().toUpperCase().startsWith("YES");
@@ -329,29 +381,39 @@ Reply with ONLY: YES or NO, then one sentence explanation.`;
       .filter(l => l.startsWith("|") && !l.includes("---") && !l.includes("Hazard ID") && !l.includes("{{")
         && l.replace(/\|/g, "").trim().length > 0);
 
-    const raPrompt = `You are a medical device risk analyst. Generate a complete, clean Risk Analysis document per ISO 14971:2019.
+    const raPrompt = `You are a senior risk management engineer. Generate a complete, professional Risk Analysis document per ISO 14971:2019 for an FDA 510(k) submission.
+
+PRODUCT CONTEXT:
+${PRODUCT_CONTEXT}
 
 STORY THAT TRIGGERED THIS UPDATE:
 ${context}
 
-RISK ASSESSMENT: ${riskCheck}
+RISK ASSESSMENT DECISION: ${riskCheck}
 
-EXISTING RISK ROWS (preserve these exactly, add new row for ${storyId}):
+EXISTING RISK ROWS (preserve exactly, add new row for ${storyId}):
 ${existingRaRows.join("\n") || "(none yet)"}
 
 Instructions:
-- Output the COMPLETE document — all sections: General Info, Scope, Severity scale table, Probability scale table, Risk Level Matrix, Risk Register, AI Evaluation section, Risk-Benefit Summary, Revision History
-- For ${storyId}: create hazard ID H-${storyId}, fill all columns based on clinical context
-- Severity/probability: be conservative (patient safety first)
-- Risk Level = Severity × Probability mapped to Low/Medium/High/Critical
-- Use clean pipe-table syntax with | aligned columns
-- Do NOT include any {{PLACEHOLDER}} text — fill every field with real content or "N/A"
+- Output the COMPLETE document with ALL sections
+- For the new hazard (H-${storyId}):
+  * Hazard Description: the technical root cause (e.g. "Confidence threshold miscalibration")
+  * Hazardous Situation: the clinical scenario (e.g. "Radiologist presented with high-confidence score for false negative detection")
+  * Harm: specific patient outcome (e.g. "Delayed diagnosis of malignant glioma leading to disease progression")
+  * Severity: use ISO 14971 scale 1-5. Brain tumor misdiagnosis = 4 (Critical) or 5 (Catastrophic) by default
+  * Probability: assess based on how often this code path executes in clinical use
+  * Risk Level: Severity × Probability → Low / Medium / **High** / **Critical**
+  * Mitigation: specific, implementable controls (e.g. "Mandatory confidence threshold warning UI", "Radiologist override required for low-confidence results", "IEC 62304 unit test coverage ≥95%")
+  * Residual Risk: after mitigation, reassess level
+- All High/Critical risks must have mitigations — no exceptions
+- Severity/probability: be conservative. When in doubt, go higher.
+- Use bold for **High** and **Critical** risk levels in the table
+- Do NOT include any {{PLACEHOLDER}} text — every field must have real content
 - Mark AI-generated fields with [AI]
-- Risk Level cells: use bold for High/Critical (**High**, **Critical**)
+- Add reviewer note: "⚠ AI-generated draft. Risk entries must be reviewed by a qualified risk management engineer before approval."
 
 Today's date: ${now.split("T")[0]}
-Product: GreyZone AI SaMD
-Version: ${bumpVersion(raDoc.version)}`;
+Document version: ${bumpVersion(raDoc.version)}`;
 
     const raContent = await callClaude(raPrompt);
     const raNewVer = bumpVersion(raDoc.version);
