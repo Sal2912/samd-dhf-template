@@ -24,7 +24,7 @@ const JIRA_TOKEN   = process.env.JIRA_API_TOKEN    || "";
 const GH_TOKEN     = process.env.GITHUB_TOKEN      || "";
 const GH_REPO      = process.env.GITHUB_REPO       || "Sal2912/samd-dhf-template";
 const CLAUDE_KEY   = process.env.ANTHROPIC_API_KEY || "";
-const CLAUDE_MODEL = "claude-haiku-4-5";
+const CLAUDE_MODEL = "claude-sonnet-4-5";
 
 // ── Product Context (used in all prompts) ──────────────────────────────────────
 // Update this block to match your actual product. This context is injected into
@@ -178,7 +178,8 @@ async function callClaude(prompt: string): Promise<string> {
     },
     body: JSON.stringify({
       model: CLAUDE_MODEL,
-      max_tokens: 2000,
+      max_tokens: 4000,
+      system: "You are a senior regulatory affairs engineer writing FDA 510(k) submission documents for a Software as a Medical Device (SaMD) product. CRITICAL RULES: (1) Only use information explicitly provided in the STORY CONTEXT or PRODUCT CONTEXT — never invent requirement IDs, test IDs, hazard IDs, PR numbers, or clinical details that are not in the provided context. (2) If a value is unknown, write ⚠ TBD — do not guess or fabricate. (3) Write complete, well-structured documents — never truncate mid-sentence or mid-table. (4) Every requirement must be traceable to something in the provided context. (5) All AI-generated content must be marked [AI] so reviewers know what to verify.",
       messages: [{ role: "user", content: prompt }],
     }),
   });
@@ -312,10 +313,11 @@ ${context}
 
 Instructions:
 - Write ONLY the story block for ${storyId} — no preamble, no explanation
-- Requirement Statement: precise, testable, written in "The system shall..." format
-- Acceptance Criteria: specific, measurable conditions a QA engineer can verify
+- Base the requirement STRICTLY on the story title, description, and PR content provided — do not invent features not mentioned
+- Requirement Statement: precise, testable, written in "The system shall..." format derived directly from the story context
+- Acceptance Criteria: write only criteria that can be verified from what is described in the story — mark any unclear criteria as ⚠ TBD
 - Type: Safety if it touches AI output, confidence scoring, DICOM, or patient data; Functional for core features; Interface for PACS/DICOM/HL7; Non-Functional for performance/security
-- Consider the product's key safety concerns (false negatives, algorithm bias, DICOM failures) when writing the requirement
+- If the story description is vague, write a conservative requirement and mark it [AI - requires review]
 - Keep each field to 2-4 sentences. Be precise, not verbose.
 - Return ONLY the markdown block, no extra text
 
@@ -375,6 +377,7 @@ ${existingTmRows.join("\n") || "(none yet)"}
 
 Instructions:
 - Output the COMPLETE document with all sections
+- ONLY include data that exists in the story context or existing rows — do not fabricate PR numbers, test IDs, or requirement IDs not mentioned
 - For ${storyId}:
   * Sys Req ID: derive from Epic ID (${story.epicId || "SYS-TBD"}) + "-SYS-01" format (Epic is the PARENT of this story — use it as the system-level grouping)
   * SW Req ID: ${storyId}
@@ -446,7 +449,8 @@ EXISTING RISK ROWS (preserve exactly, add new row for ${storyId}):
 ${existingRaRows.join("\n") || "(none yet)"}
 
 Instructions:
-- Output the COMPLETE document with ALL sections
+- Output the COMPLETE document with ALL sections — do not truncate the table mid-row
+- Base ALL hazard descriptions on the actual story context provided — do not invent clinical scenarios not derivable from the story
 - For the new hazard (H-${storyId}):
   * Hazard Description: the technical root cause (e.g. "Confidence threshold miscalibration")
   * Hazardous Situation: the clinical scenario (e.g. "Radiologist presented with high-confidence score for false negative detection")
@@ -525,10 +529,12 @@ ${context}
 Instructions:
 - Return ONLY the Epic block (header + requirements table) to insert
 - Use the Epic ID (${epicId}) as the grouping header
-- Derive 2-4 system-level requirements from the epic description and stories
-- Each requirement gets ID: ${epicId}-SYS-01, ${epicId}-SYS-02, etc.
+- Derive ONLY system-level requirements that are directly supported by the epic description and story list — do not invent requirements not implied by the context
+- Each requirement gets ID: ${epicId}-SYS-01, ${epicId}-SYS-02, etc. (maximum 4)
 - Keep requirements at SYSTEM level (what, not how)
+- If the epic description is sparse, write 1-2 well-grounded requirements rather than 4 vague ones
 - Set Linked Stories to the story IDs listed above
+- Mark any requirement that required inference as [AI - requires review]
 
 Format:
 ### ${epicId} — ${epic.title}
