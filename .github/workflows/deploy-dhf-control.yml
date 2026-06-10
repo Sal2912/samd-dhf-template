@@ -6,6 +6,7 @@ on:
     branches: [main]
     paths:
       - "dhf-control/**"
+      - "dhf-templates/**"
   workflow_dispatch:   # manual trigger from the Actions tab
 
 jobs:
