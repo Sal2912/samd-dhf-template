@@ -13,6 +13,9 @@ jobs:
     name: Build → Push image → SSH deploy
     runs-on: ubuntu-latest
 
+    env:
+      IMAGE: ghcr.io/sal2912/dhf-control
+
     steps:
       # ── 1. Checkout ──────────────────────────────────────────────────────────
       - name: Checkout repository
@@ -25,8 +28,8 @@ jobs:
       - name: Build Docker image
         run: |
           docker build \
-            -t ghcr.io/${{ github.repository_owner }}/dhf-control:latest \
-            -t ghcr.io/${{ github.repository_owner }}/dhf-control:${{ github.sha }} \
+            -t ${{ env.IMAGE }}:latest \
+            -t ${{ env.IMAGE }}:${{ github.sha }} \
             ./dhf-control
 
       # ── 3. Push to GitHub Container Registry ─────────────────────────────────
@@ -39,8 +42,8 @@ jobs:
 
       - name: Push image
         run: |
-          docker push ghcr.io/${{ github.repository_owner }}/dhf-control:latest
-          docker push ghcr.io/${{ github.repository_owner }}/dhf-control:${{ github.sha }}
+          docker push ${{ env.IMAGE }}:latest
+          docker push ${{ env.IMAGE }}:${{ github.sha }}
 
       # ── 4. SSH into your server and pull + restart ────────────────────────────
       - name: Deploy to server via SSH
@@ -51,7 +54,7 @@ jobs:
           key:      ${{ secrets.DEPLOY_SSH_KEY }}    # private key (no passphrase)
           script: |
             # Pull the latest image
-            docker pull ghcr.io/${{ github.repository_owner }}/dhf-control:latest
+            docker pull ghcr.io/sal2912/dhf-control:latest
 
             # Stop + remove the old container (if running)
             docker stop dhf-control 2>/dev/null || true
@@ -69,7 +72,7 @@ jobs:
               -e JIRA_PROJECT_KEY="${{ secrets.JIRA_PROJECT_KEY }}" \
               -e GITHUB_TOKEN="${{ secrets.DEPLOY_GITHUB_TOKEN }}" \
               -e GITHUB_REPO="Sal2912/samd-dhf-template" \
-              ghcr.io/${{ github.repository_owner }}/dhf-control:latest
+              ghcr.io/sal2912/dhf-control:latest
 
             # Quick health check
             sleep 5
